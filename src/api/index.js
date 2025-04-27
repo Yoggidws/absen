@@ -5,6 +5,7 @@ const dotenv = require("dotenv")
 const helmet = require("helmet")
 const rateLimit = require("express-rate-limit")
 const { errorHandler } = require("../middlewares/errorMiddleware")
+const vercelCorsMiddleware = require("../middlewares/vercelCorsMiddleware")
 const { testConnection } = require("../config/db")
 
 // Load environment variables
@@ -29,6 +30,12 @@ const app = express()
 // Apply security middleware
 app.use(helmet()) // Add security headers
 app.use("/api", apiLimiter) // Apply rate limiting to API routes
+
+// Apply CORS middleware - use our custom middleware for Vercel
+if (process.env.VERCEL || process.env.DEPLOY_TARGET === 'vercel') {
+  console.log('Using Vercel CORS middleware');
+  app.use(vercelCorsMiddleware);
+}
 app.use(
   cors({
     origin: "*",
@@ -80,23 +87,32 @@ app.get("/health", (_req, res) => {
 
 app.use(errorHandler)
 
-// Replace the last line of your index.js file
-module.exports = (req, res) => {
-  // This prevents an issue with unhandled requests
+// Handle serverless deployment (Vercel)
+const handleServerless = (req, res) => {
+  // Handle OPTIONS requests for CORS preflight
   if (req.method === "OPTIONS") {
-    res.status(200).end()
-    return
+    // Set CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Authorization');
+    res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+    res.status(200).end();
+    return;
   }
 
-  return app(req, res)
+  // Forward the request to the Express app
+  return app(req, res);
+};
+
+// Export for serverless environments (Vercel)
+module.exports = handleServerless;
+
+// For traditional Node.js environments
+if (process.env.NODE_ENV !== 'production' || process.env.DEPLOY_TARGET !== 'vercel') {
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Server ${process.env.NODE_ENV} running on port ${port}`)
+    console.log(`Local: http://localhost:${port}`)
+    console.log(`Network: http://0.0.0.0:${port}`)
+    console.log(`CORS is configured to allow all origins`)
+  })
 }
-
-// Replace the last line of your index.js file
-// module.exports = app; production
-
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Server ${process.env.NODE_ENV} running on port ${port}`)
-  console.log(`Local: http://localhost:${port}`)
-  console.log(`Network: http://0.0.0.0:${port}`)
-  console.log(`CORS is configured to allow all origins`)
-})

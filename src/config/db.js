@@ -6,11 +6,11 @@ const path = require("path")
 const db = knex({
   client: "pg",
   connection: {
-    host: process.env.DB_HOST || 'absensi-yoggisaputraaa-b9c8.h.aivencloud.com',
-    port: process.env.DB_PORT || 22319,
-    user: process.env.DB_USER || 'avnadmin',
-    password: process.env.DB_PASS || 'AVNS_SYL3I2ooLTCRimcJmNy',
-    database: process.env.DB_NAME || 'absensi',
+    host: process.env.DB_HOST ,
+    port: process.env.DB_PORT ,
+    user: process.env.DB_USER ,
+    password: process.env.DB_PASS,
+    database: process.env.DB_NAME,
     ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
     // Set timezone to UTC for consistent timestamp handling
     timezone: "UTC",

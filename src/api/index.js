@@ -76,13 +76,33 @@ app.use("/api/reports", require("../routes/reportRoutes"))
 app.get("/test", (_req, res) => {
   res.status(200).json({ status: "ok", message: "Test endpoint working" })
 })
-app.get("/health", (_req, res) => {
-  res.status(200).json({
-    status: "ok",
-    message: "Server is running",
-    environment: process.env.NODE_ENV,
-    timestamp: new Date().toISOString()
-  })
+app.get("/health", async (_req, res) => {
+  try {
+    // Test database connection
+    const dbConnected = await testConnection();
+
+    res.status(200).json({
+      status: dbConnected ? "ok" : "warning",
+      message: dbConnected ? "Server is running with database connection" : "Server is running but database connection failed",
+      environment: process.env.NODE_ENV,
+      timestamp: new Date().toISOString(),
+      database: {
+        connected: dbConnected,
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        database: process.env.DB_NAME,
+        ssl: process.env.DB_SSL === "true" ? "enabled" : "disabled"
+      },
+      vercel: process.env.VERCEL ? true : false
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "error",
+      message: "Error checking server health",
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 })
 
 app.use(errorHandler)

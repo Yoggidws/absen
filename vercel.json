@@ -17,5 +17,16 @@
         "Access-Control-Allow-Headers": "X-Requested-With, Content-Type, Accept, Authorization"
       }
     }
-  ]
+  ],
+  "env": {
+    "NODE_ENV": "production",
+    "DB_HOST": "absensi-yoggisaputraaa-b9c8.h.aivencloud.com",
+    "DB_PORT": "22319",
+    "DB_USER": "avnadmin",
+    "DB_PASS": "AVNS_SYL3I2ooLTCRimcJmNy",
+    "DB_NAME": "absensi",
+    "DB_SSL": "true",
+    "VERCEL": "true",
+    "DEPLOY_TARGET": "vercel"
+  }
 }

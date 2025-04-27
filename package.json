@@ -1,0 +1,44 @@
+{
+  "name": "attendance-system-backend",
+  "version": "1.0.0",
+  "description": "Backend for QR code based attendance system with PostgreSQL",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node src/api/index.js",
+    "dev": "nodemon src/api/index.js",
+    "migrate": "node src/db/migrate.js",
+    "seed": "node src/db/seed.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy": "npm run migrate && npm run seed && npm start",
+    "docker-build": "docker build -t hris-backend .",
+    "docker-run": "docker run -p 5000:5000 --env-file .env hris-backend"
+  },
+  "dependencies": {
+    "axios": "^1.8.4",
+    "bcrypt": "^5.1.1",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "date-fns": "^4.1.0",
+    "dotenv": "^16.0.3",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "express-async-handler": "^1.2.0",
+    "express-rate-limit": "^6.7.0",
+    "geolib": "^3.3.3",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.0",
+    "knex": "^2.4.2",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.2",
+    "nodemailer": "^6.9.1",
+    "pdfkit": "^0.13.0",
+    "pg": "^8.10.0",
+    "qrcode": "^1.5.1",
+    "serverless-http": "^3.2.0",
+    "uuid": "^11.1.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}

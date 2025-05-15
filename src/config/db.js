@@ -18,26 +18,35 @@ const db = knex({
     application_name: "attendance_system",
   },
   pool: {
-    min: 1,
-    max: 10,
-    // Important for serverless: destroy idle connections
-    idleTimeoutMillis: 30000,
-    // Important for serverless: acquire timeout
-    acquireTimeoutMillis: 30000,
+    min: 0, // Start with 0 connections
+    max: 3, // Reduce max connections to avoid hitting limits
+    // Reduce idle timeout to release connections faster
+    idleTimeoutMillis: 10000,
+    // Reduce acquire timeout
+    acquireTimeoutMillis: 15000,
     // Verify connection before use to avoid stale connections
     afterCreate: (conn, done) => {
       conn.query("SELECT 1", (err) => {
         if (err) {
           // Connection is bad, remove it from the pool
-          done(err, conn)
+          console.error("Connection verification failed:", err.message);
+          done(err, conn);
         } else {
           // Connection is good, set session parameters
           conn.query('SET timezone="UTC";', (tzErr) => {
-            done(tzErr, conn)
-          })
+            if (tzErr) {
+              console.error("Failed to set timezone:", tzErr.message);
+            }
+            done(tzErr, conn);
+          });
         }
-      })
+      });
     },
+    // Force close connections after they've been in the pool for too long
+    reapIntervalMillis: 30000, // Check for old connections every 30 seconds
+    createTimeoutMillis: 10000, // Timeout when creating a new connection
+    // Destroy connections that have been idle for too long
+    createRetryIntervalMillis: 2000, // Wait 2 seconds before retrying to create a connection
   },
   migrations: {
     tableName: "knex_migrations",
@@ -88,4 +97,34 @@ const testConnection = async () => {
   }
 }
 
-module.exports = { db, testConnection }
+// Function to explicitly destroy all connections in the pool
+const destroyConnectionPool = async () => {
+  try {
+    console.log("Destroying database connection pool...");
+    await db.destroy();
+    console.log("Database connection pool destroyed successfully");
+    return true;
+  } catch (error) {
+    console.error(`Error destroying database connection pool: ${error.message}`);
+    return false;
+  }
+};
+
+// Function to get current pool status
+const getPoolStatus = () => {
+  try {
+    const pool = db.client.pool;
+    return {
+      size: pool.numUsed() + pool.numFree(),
+      used: pool.numUsed(),
+      free: pool.numFree(),
+      pending: pool.numPendingAcquires(),
+      max: pool.max,
+    };
+  } catch (error) {
+    console.error(`Error getting pool status: ${error.message}`);
+    return { error: error.message };
+  }
+};
+
+module.exports = { db, testConnection, destroyConnectionPool, getPoolStatus }

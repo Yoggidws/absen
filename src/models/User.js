@@ -103,11 +103,11 @@ const User = {
     const hashedPassword = await bcrypt.hash(userData.password, salt)
 
     // Generate a unique ID for the user
-    const userId = userData.id || "EMP-" + Math.random().toString(36).substring(2, 10).toUpperCase()
+    // const userId = userData.id || "EMP-" + Math.random().toString(36).substring(2, 10).toUpperCase()
 
     // Insert user
     await db("users").insert({
-      id: userId,
+      // id: userId,
       name: userData.name,
       email: userData.email,
       password: hashedPassword,
@@ -118,7 +118,7 @@ const User = {
       active: userData.active !== undefined ? userData.active : true,
     })
 
-    return await User.findById(userId)
+    return await User.findById(userData.id)
   },
 
   /**

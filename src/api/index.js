@@ -6,18 +6,19 @@ const helmet = require("helmet")
 const rateLimit = require("express-rate-limit")
 const { errorHandler } = require("../middlewares/errorMiddleware")
 const vercelCorsMiddleware = require("../middlewares/vercelCorsMiddleware")
-const { testConnection } = require("../config/db")
+const { testConnection, getPoolStatus, destroyConnectionPool } = require("../config/db")
 
 // Load environment variables
 dotenv.config()
 
-const port = process.env.PORT
+const port = 5000 // Explicitly use port 5002
+console.log(`Using port: ${port}`)
 // const serverless = require("serverless-http");
 
 // Configure rate limiting
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  max: 1000, // Limit each IP to 1000 requests per windowMs
   standardHeaders: true,
   legacyHeaders: false,
   message: "Too many requests from this IP, please try again after 15 minutes"
@@ -38,7 +39,7 @@ if (process.env.VERCEL || process.env.DEPLOY_TARGET === 'vercel') {
 }
 app.use(
   cors({
-    origin: "*",
+    origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
     credentials: true,
@@ -48,7 +49,12 @@ app.use(
 )
 
 // Add OPTIONS handling for preflight requests
-app.options('*', cors())
+app.options('*', cors({
+  origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  credentials: true
+}))
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason)
@@ -72,6 +78,7 @@ app.use("/api/documents", require("../routes/documentRoutes"))
 app.use("/api/compensation", require("../routes/compensationRoutes"))
 app.use("/api/payroll", require("../routes/payrollRoutes"))
 app.use("/api/reports", require("../routes/reportRoutes"))
+app.use("/api/employees", require("../routes/employeeRoutes"))
 
 app.get("/test", (_req, res) => {
   res.status(200).json({ status: "ok", message: "Test endpoint working" })
@@ -80,6 +87,9 @@ app.get("/health", async (_req, res) => {
   try {
     // Test database connection
     const dbConnected = await testConnection();
+
+    // Get database pool status
+    const poolStatus = getPoolStatus();
 
     res.status(200).json({
       status: dbConnected ? "ok" : "warning",
@@ -91,7 +101,8 @@ app.get("/health", async (_req, res) => {
         host: process.env.DB_HOST,
         port: process.env.DB_PORT,
         database: process.env.DB_NAME,
-        ssl: process.env.DB_SSL === "true" ? "enabled" : "disabled"
+        ssl: process.env.DB_SSL === "true" ? "enabled" : "disabled",
+        pool: poolStatus
       },
       vercel: process.env.VERCEL ? true : false
     });
@@ -101,6 +112,42 @@ app.get("/health", async (_req, res) => {
       message: "Error checking server health",
       error: error.message,
       timestamp: new Date().toISOString()
+    });
+  }
+})
+
+// Add a pool management endpoint
+app.get("/pool-status", async (_req, res) => {
+  try {
+    const poolStatus = getPoolStatus();
+    res.status(200).json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      pool: poolStatus
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error getting pool status",
+      error: error.message
+    });
+  }
+})
+
+// Add a pool reset endpoint
+app.post("/reset-pool", async (_req, res) => {
+  try {
+    const result = await destroyConnectionPool();
+    res.status(200).json({
+      success: result,
+      message: result ? "Connection pool reset successfully" : "Failed to reset connection pool",
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error resetting connection pool",
+      error: error.message
     });
   }
 })

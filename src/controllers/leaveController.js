@@ -668,24 +668,31 @@ exports.getLeaveBalance = asyncHandler(async (req, res) => {
 
   // If no leave balance record exists, create one
   if (!leaveBalance) {
+    // Generate a unique ID for the leave balance
     const newLeaveBalanceId = `LB-${Math.random().toString(36).substring(2, 10).toUpperCase()}`
 
-    // Create default leave balance
-    [leaveBalance] = await db("leave_balance")
-      .insert({
-        id: newLeaveBalanceId,
-        user_id: userId,
-        year: currentYear,
-        total_allowance: 20,
-        used_days: 0,
-        remaining_days: 20,
-        carried_over: 0,
-        sick_allowance: 10,
-        sick_used: 0,
-        personal_allowance: 5,
-        personal_used: 0
-      })
-      .returning("*")
+    try {
+      // Create default leave balance
+      [leaveBalance] = await db("leave_balance")
+        .insert({
+          id: newLeaveBalanceId,
+          user_id: userId,
+          year: currentYear,
+          total_allowance: 20,
+          used_days: 0,
+          remaining_days: 20,
+          carried_over: 0,
+          sick_allowance: 10,
+          sick_used: 0,
+          personal_allowance: 5,
+          personal_used: 0
+        })
+        .returning("*")
+    } catch (error) {
+      console.error("Error creating leave balance:", error)
+      res.status(500)
+      throw new Error("Failed to create leave balance record")
+    }
   }
 
   // Get approved leave requests for the current year

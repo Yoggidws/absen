@@ -7,13 +7,20 @@ const { asyncHandler } = require("../middlewares/errorMiddleware")
  * @access  Private/Admin
  */
 exports.createSalaryRecord = asyncHandler(async (req, res) => {
-  const { userId, baseSalary, currency, effectiveDate, bonuses, deductions, notes } = req.body
+  const { userId, baseSalary, mealAllowance, effectiveDate, notes } = req.body
 
   // Check if user exists
   const user = await db("users").where({ id: userId }).first()
   if (!user) {
     res.status(404)
     throw new Error("User not found")
+  }
+
+  // Check if user already has a compensation record
+  const existingCompensation = await db("compensation").where({ user_id: userId }).first()
+  if (existingCompensation) {
+    res.status(400)
+    throw new Error(`User ${user.name} already has a compensation record. Please edit the existing record instead.`)
   }
 
   // Generate a unique ID for the compensation record
@@ -25,10 +32,8 @@ exports.createSalaryRecord = asyncHandler(async (req, res) => {
       id: compensationId,
       user_id: userId,
       base_salary: baseSalary,
-      currency: currency || "USD",
+      meal_allowance: mealAllowance || 0,
       effective_date: effectiveDate || new Date(),
-      bonuses: bonuses ? JSON.stringify(bonuses) : null,
-      deductions: deductions ? JSON.stringify(deductions) : null,
       notes: notes || null,
       created_by: req.user.id,
     })
@@ -60,10 +65,8 @@ exports.getSalaryRecords = asyncHandler(async (req, res) => {
       "u.department",
       "u.position",
       "c.base_salary",
-      "c.currency",
+      "c.meal_allowance",
       "c.effective_date",
-      "c.bonuses",
-      "c.deductions",
       "c.notes",
       "c.created_at",
       "c.updated_at",
@@ -107,27 +110,12 @@ exports.getMyCompensation = asyncHandler(async (req, res) => {
   // Get user's salary history
   const salaryHistory = await db("compensation")
     .where({ user_id: userId })
-    .select("id", "base_salary", "currency", "effective_date", "bonuses", "deductions", "notes", "created_at")
+    .select("id", "base_salary", "meal_allowance", "effective_date", "notes", "created_at")
     .orderBy("effective_date", "desc")
 
   // Calculate total compensation
-  let totalCompensation = latestSalary.base_salary
-
-  // Add bonuses
-  if (latestSalary.bonuses) {
-    const bonuses = JSON.parse(latestSalary.bonuses)
-    if (Array.isArray(bonuses)) {
-      totalCompensation += bonuses.reduce((sum, bonus) => sum + (Number.parseFloat(bonus.amount) || 0), 0)
-    }
-  }
-
-  // Subtract deductions
-  if (latestSalary.deductions) {
-    const deductions = JSON.parse(latestSalary.deductions)
-    if (Array.isArray(deductions)) {
-      totalCompensation -= deductions.reduce((sum, deduction) => sum + (Number.parseFloat(deduction.amount) || 0), 0)
-    }
-  }
+  let totalCompensation = latestSalary.base_salary +
+                          (latestSalary.meal_allowance || 0)
 
   res.status(200).json({
     success: true,
@@ -161,10 +149,8 @@ exports.getSalaryRecordById = asyncHandler(async (req, res) => {
       "u.department",
       "u.position",
       "c.base_salary",
-      "c.currency",
+      "c.meal_allowance",
       "c.effective_date",
-      "c.bonuses",
-      "c.deductions",
       "c.notes",
       "c.created_at",
       "c.updated_at",
@@ -191,7 +177,7 @@ exports.getSalaryRecordById = asyncHandler(async (req, res) => {
  */
 exports.updateSalaryRecord = asyncHandler(async (req, res) => {
   const { id } = req.params
-  const { baseSalary, currency, effectiveDate, bonuses, deductions, notes } = req.body
+  const { baseSalary, mealAllowance, effectiveDate, notes } = req.body
 
   // Check if salary record exists
   const salaryRecord = await db("compensation").where({ id }).first()
@@ -205,10 +191,8 @@ exports.updateSalaryRecord = asyncHandler(async (req, res) => {
     .where({ id })
     .update({
       base_salary: baseSalary || salaryRecord.base_salary,
-      currency: currency || salaryRecord.currency,
+      meal_allowance: mealAllowance !== undefined ? mealAllowance : salaryRecord.meal_allowance,
       effective_date: effectiveDate || salaryRecord.effective_date,
-      bonuses: bonuses ? JSON.stringify(bonuses) : salaryRecord.bonuses,
-      deductions: deductions ? JSON.stringify(deductions) : salaryRecord.deductions,
       notes: notes !== undefined ? notes : salaryRecord.notes,
       updated_at: db.fn.now(),
     })
@@ -272,17 +256,26 @@ exports.getCompensationStats = asyncHandler(async (req, res) => {
   // Get overall statistics
   const { avg_salary } = await db("compensation").avg("base_salary as avg_salary").first()
 
+  const { avg_meal_allowance } = await db("compensation").avg("meal_allowance as avg_meal_allowance").first()
+
   const { min_salary } = await db("compensation").min("base_salary as min_salary").first()
 
   const { max_salary } = await db("compensation").max("base_salary as max_salary").first()
 
-  const { total_compensation } = await db("compensation").sum("base_salary as total_compensation").first()
+  // Calculate total compensation including all components
+  const totalCompensationResult = await db.raw(`
+    SELECT SUM(base_salary + COALESCE(meal_allowance, 0)) as total_compensation
+    FROM compensation
+  `)
+
+  const total_compensation = totalCompensationResult.rows[0].total_compensation
 
   res.status(200).json({
     success: true,
     stats: {
       overall: {
         average_salary: Number.parseFloat(avg_salary),
+        average_meal_allowance: Number.parseFloat(avg_meal_allowance),
         minimum_salary: Number.parseFloat(min_salary),
         maximum_salary: Number.parseFloat(max_salary),
         total_compensation: Number.parseFloat(total_compensation),

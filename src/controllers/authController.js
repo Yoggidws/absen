@@ -1,10 +1,11 @@
 const bcrypt = require("bcryptjs")
 const jwt = require("jsonwebtoken")
 const crypto = require("crypto")
-const { db } = require("../config/db")
+const { db, getPoolStatus } = require("../config/db")
 const { asyncHandler } = require("../middlewares/errorMiddleware")
 const emailUtils = require("../utils/emailUtils")
 const { generateUserId } = require("../controllers/UserController")
+const { assignDepartmentManager, updateEmployeeDepartmentId } = require("../utils/departmentManager")
 
 // Generate JWT token
 const generateToken = (id) => {
@@ -31,17 +32,45 @@ exports.register = asyncHandler(async (req, res) => {
   // Generate a sequential ID using the same format as in UserController
   const userId = await generateUserId()
 
-  const inserted = await db("users")
-    .insert({
-      id: userId,
-      name,
-      email,
-      password: hashedPassword,
-      department,
-      position,
-      role: "employee",
-    })
-    .returning("id")
+  // Use a transaction to ensure both user and employee are created or neither is
+  await db.transaction(async (trx) => {
+    // Insert user
+    await trx("users")
+      .insert({
+        id: userId,
+        name,
+        email,
+        password: hashedPassword,
+        department,
+        position,
+        role: "employee",
+      })
+
+    // Create basic employee record with the same ID
+    // This ensures every user has an employee record for HR purposes
+    await trx("employees")
+      .insert({
+        employee_id: userId,
+        full_name: name,
+        gender: "other", // Default value, to be updated later
+        place_of_birth: "",
+        date_of_birth: new Date("1900-01-01"), // Default value, to be updated later
+        address: "",
+        phone_number: "",
+        email: email,
+        marital_status: "single", // Default value, to be updated later
+        number_of_children: 0,
+        position: position || "",
+        department: department || "",
+        department_id: null, // To be updated later
+        hire_date: new Date(), // Current date as hire date
+        employment_status: "permanent",
+        basic_salary: 0, // To be updated later
+        allowance: 0,
+        profile_picture: null,
+        user_id: userId
+      })
+  })
 
   const user = await db("users")
     .where({ id: userId })
@@ -49,6 +78,11 @@ exports.register = asyncHandler(async (req, res) => {
     .first()
 
   if (user) {
+    // If the user has a department, update the employee's department_id
+    if (department) {
+      await updateEmployeeDepartmentId(userId, department)
+    }
+
     const token = generateToken(user.id)
     await emailUtils.sendWelcomeEmail(user)
 
@@ -63,98 +97,79 @@ exports.register = asyncHandler(async (req, res) => {
   }
 })
 
-// exports.register = asyncHandler(async (req, res) => {
-//   const { name, email, password, department, position } = req.body
-
-//   // Check if user already exists
-//   const userExists = await db("users").where({ email }).first()
-
-//   if (userExists) {
-//     res.status(400)
-//     throw new Error("User already exists")
-//   }
-
-//   // Hash password
-//   const salt = await bcrypt.genSalt(10)
-//   const hashedPassword = await bcrypt.hash(password, salt)
-
-//   // Create user
-//   const [userId] = await db("users")
-//     .insert({
-//       name,
-//       email,
-//       password: hashedPassword,
-//       department,
-//       position,
-//       role: "employee", // Default role
-//     })
-//     .returning("id")
-
-//   // Get the created user
-//   const user = await db("users")
-//     .where({ id: userId })
-//     .select("id", "name", "email", "role", "department", "position", "avatar", "created_at")
-//     .first()
-
-//   if (user) {
-//     // Generate token
-//     const token = generateToken(user.id)
-
-//     // Send welcome email
-//     await emailUtils.sendWelcomeEmail(user)
-
-//     res.status(201).json({
-//       success: true,
-//       user,
-//       token,
-//     })
-//   } else {
-//     res.status(400)
-//     throw new Error("Invalid user data")
-//   }
-// })
-
-// @desc    Authenticate user & get token
-// @route   POST /api/auth/login
-// @access  Public
 exports.login = asyncHandler(async (req, res) => {
-  const { email, password } = req.body
+  try {
+    // Log pool status before login
+    const poolStatusBefore = getPoolStatus();
+    console.log("Database pool status before login:", poolStatusBefore);
 
-  // Check for user email
-  const user = await db("users").where({ email }).first()
+    // Check if we're hitting connection limits
+    if (poolStatusBefore.used >= poolStatusBefore.max - 1) {
+      console.warn("WARNING: Database connection pool near capacity. Used:",
+        poolStatusBefore.used, "Max:", poolStatusBefore.max);
+    }
 
-  if (!user) {
-    res.status(401)
-    throw new Error("Invalid credentials")
+    const { email, password } = req.body
+
+    // Check for user email - use a transaction to ensure connection is released
+    let user;
+    await db.transaction(async (trx) => {
+      // Get user with transaction
+      user = await trx("users").where({ email }).first();
+
+      if (!user) {
+        res.status(401);
+        throw new Error("Invalid credentials");
+      }
+
+      // Check if user is active
+      if (!user.active) {
+        res.status(401);
+        throw new Error("Your account has been deactivated. Please contact an administrator.");
+      }
+
+      // Check if password matches
+      const isMatch = await bcrypt.compare(password, user.password);
+
+      if (!isMatch) {
+        res.status(401);
+        throw new Error("Invalid credentials");
+      }
+    });
+
+    // Generate token
+    const token = generateToken(user.id);
+
+    // Remove sensitive data from response
+    delete user.password;
+    delete user.reset_password_token;
+    delete user.reset_password_expire;
+
+    // Log pool status after login
+    const poolStatusAfter = getPoolStatus();
+    console.log("Database pool status after login:", poolStatusAfter);
+
+    res.status(200).json({
+      success: true,
+      user,
+      token,
+    });
+  } catch (error) {
+    // If there's an error about connection slots, log it clearly
+    if (error.message && error.message.includes("connection slots")) {
+      console.error("DATABASE CONNECTION LIMIT ERROR:", error.message);
+
+      // Return a more user-friendly error
+      res.status(503).json({
+        success: false,
+        message: "The server is currently experiencing high load. Please try again in a few moments.",
+        error: "Database connection limit reached"
+      });
+    } else {
+      // Re-throw other errors to be handled by the error middleware
+      throw error;
+    }
   }
-
-  // Check if user is active
-  if (!user.active) {
-    res.status(401)
-    throw new Error("Your account has been deactivated. Please contact an administrator.")
-  }
-
-  // Check if password matches
-  const isMatch = await bcrypt.compare(password, user.password)
-
-  if (!isMatch) {
-    res.status(401)
-    throw new Error("Invalid credentials")
-  }
-
-  // Generate token
-  const token = generateToken(user.id)
-
-  // Remove sensitive data from response
-  delete user.password
-  delete user.reset_password_token
-  delete user.reset_password_expire
-
-  res.status(200).json({
-    success: true,
-    user,
-    token,
-  })
 })
 
 // @desc    Get user profile
@@ -210,6 +225,16 @@ exports.updateProfile = asyncHandler(async (req, res) => {
     .where({ id: req.user.id })
     .update(updateData)
     .returning(["id", "name", "email", "role", "department", "position", "avatar", "created_at", "updated_at"])
+
+  // If department is changed, update the employee's department_id
+  if (department) {
+    await updateEmployeeDepartmentId(req.user.id, department)
+
+    // If user is a manager, try to assign as department manager
+    if (user.role === 'manager' || user.role === 'admin') {
+      await assignDepartmentManager(req.user.id, user.role, department)
+    }
+  }
 
   res.status(200).json({
     success: true,
@@ -428,6 +453,22 @@ exports.updateUser = asyncHandler(async (req, res) => {
       "created_at",
       "updated_at",
     ])
+
+  // If role is changed to manager or department is changed, update department manager assignment
+  if (role === 'manager' || role === 'admin' || department !== undefined) {
+    const userRole = role || user.role
+    const userDepartment = department !== undefined ? department : user.department
+
+    // If user is a manager and has a department, try to assign as department manager
+    if ((userRole === 'manager' || userRole === 'admin') && userDepartment) {
+      await assignDepartmentManager(req.params.id, userRole, userDepartment)
+    }
+  }
+
+  // If department is changed, update the employee's department_id
+  if (department !== undefined) {
+    await updateEmployeeDepartmentId(req.params.id, department)
+  }
 
   res.status(200).json({
     success: true,

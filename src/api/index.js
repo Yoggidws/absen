@@ -32,16 +32,17 @@ const app = express()
 app.use(helmet()) // Add security headers
 app.use("/api", apiLimiter) // Apply rate limiting to API routes
 
-// Apply CORS middleware - use our custom middleware for Vercel
-if (process.env.VERCEL || process.env.DEPLOY_TARGET === 'vercel') {
-  console.log('Using Vercel CORS middleware');
-  app.use(vercelCorsMiddleware);
-}
+// Apply our enhanced CORS middleware for all environments
+console.log('Using enhanced CORS middleware');
+app.use(vercelCorsMiddleware);
+
+// Fallback CORS configuration using the cors package
+// This is a secondary layer of protection in case our middleware fails
 app.use(
   cors({
-    origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "access-control-allow-methods", "Access-Control-Allow-Methods", "*"],
     credentials: true,
     preflightContinue: false,
     optionsSuccessStatus: 204
@@ -50,9 +51,9 @@ app.use(
 
 // Add OPTIONS handling for preflight requests
 app.options('*', cors({
-  origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "access-control-allow-methods", "Access-Control-Allow-Methods", "*"],
   credentials: true
 }))
 
@@ -158,10 +159,30 @@ app.use(errorHandler)
 const handleServerless = (req, res) => {
   // Handle OPTIONS requests for CORS preflight
   if (req.method === "OPTIONS") {
-    // Set CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Get allowed origins from environment variable or use wildcard
+    const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['*'];
+
+    // Get the origin of the request
+    const origin = req.headers.origin;
+
+    // Set CORS headers - check if origin is allowed or if we're using wildcard
+    if (allowedOrigins.includes('*') || (origin && allowedOrigins.includes(origin))) {
+      res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    } else if (origin) {
+      // If we have an origin but it's not in our allowed list, still allow it in development
+      if (process.env.NODE_ENV === 'development') {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+      } else {
+        res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0] || '*');
+      }
+    } else {
+      // No origin header, use wildcard
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Authorization, access-control-allow-methods, Access-Control-Allow-Methods, *');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Expose-Headers', '*');
     res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
     res.status(200).end();
     return;

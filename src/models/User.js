@@ -95,39 +95,85 @@ const User = {
   /**
    * Create a new user
    * @param {Object} userData - User data
+   * @param {Array<string>} roles - Array of role IDs to assign
    * @returns {Promise<Object>} - Created user object
    */
-  create: async (userData) => {
+  create: async (userData, roles = ["role_employee"]) => {
     // Hash password
     const salt = await bcrypt.genSalt(10)
     const hashedPassword = await bcrypt.hash(userData.password, salt)
 
-    // Generate a unique ID for the user
-    // const userId = userData.id || "EMP-" + Math.random().toString(36).substring(2, 10).toUpperCase()
+    // Map legacy role to role ID
+    let legacyRoleId = null
+    if (userData.role) {
+      switch (userData.role) {
+        case "admin":
+          legacyRoleId = "role_admin"
+          break
+        case "manager":
+          legacyRoleId = "role_manager"
+          break
+        case "hr":
+          legacyRoleId = "role_hr"
+          break
+        case "payroll":
+          legacyRoleId = "role_payroll"
+          break
+        case "hr_manager":
+          legacyRoleId = "role_hr_manager"
+          break
+        default:
+          legacyRoleId = "role_employee"
+      }
+    }
 
-    // Insert user
-    await db("users").insert({
-      // id: userId,
-      name: userData.name,
-      email: userData.email,
-      password: hashedPassword,
-      role: userData.role || "employee",
-      department: userData.department,
-      position: userData.position,
-      avatar: userData.avatar,
-      active: userData.active !== undefined ? userData.active : true,
+    // Start a transaction
+    return await db.transaction(async (trx) => {
+      // Insert user
+      const [userId] = await trx("users").insert({
+        name: userData.name,
+        email: userData.email,
+        password: hashedPassword,
+        role: userData.role || "employee", // Keep for backward compatibility
+        department: userData.department,
+        position: userData.position,
+        avatar: userData.avatar,
+        active: userData.active !== undefined ? userData.active : true,
+        phone: userData.phone,
+        emergency_contact: userData.emergencyContact,
+        address: userData.address,
+      }).returning("id")
+
+      // Assign roles to user, ensuring no duplicates
+      if (roles && roles.length > 0) {
+        // Remove duplicates and ensure the legacy role is not duplicated
+        const uniqueRoles = [...new Set(roles)].filter(roleId =>
+          legacyRoleId ? roleId !== legacyRoleId : true
+        )
+
+        // Only add roles if there are any left after filtering
+        if (uniqueRoles.length > 0) {
+          const userRoles = uniqueRoles.map(roleId => ({
+            user_id: userId,
+            role_id: roleId
+          }))
+          await trx("user_roles").insert(userRoles)
+        }
+      }
+
+      // Return the created user
+      return await User.findById(userId)
     })
-
-    return await User.findById(userData.id)
   },
 
   /**
    * Update a user
    * @param {string} id - User ID
    * @param {Object} userData - User data to update
+   * @param {Array<string>} roles - Array of role IDs to assign (optional)
    * @returns {Promise<Object>} - Updated user object
    */
-  update: async (id, userData) => {
+  update: async (id, userData, roles = null) => {
     const updateData = { ...userData }
 
     // Hash password if provided
@@ -136,11 +182,43 @@ const User = {
       updateData.password = await bcrypt.hash(updateData.password, salt)
     }
 
-    // Update user
-    await db("users").where({ id }).update(updateData)
+    // Start a transaction
+    return await db.transaction(async (trx) => {
+      // Update user with explicit field mapping
+      await trx("users")
+        .where({ id })
+        .update({
+          name: updateData.name,
+          email: updateData.email,
+          password: updateData.password,
+          role: updateData.role,
+          department: updateData.department,
+          position: updateData.position,
+          active: updateData.active,
+          phone: updateData.phone,
+          emergency_contact: updateData.emergencyContact,
+          address: updateData.address,
+          updated_at: new Date(),
+        })
 
-    // Return updated user
-    return await User.findById(id)
+      // Update roles if provided
+      if (roles !== null) {
+        // Delete existing role assignments
+        await trx("user_roles").where({ user_id: id }).delete()
+
+        // Add new role assignments if any are provided
+        if (roles && roles.length > 0) {
+          const userRoles = roles.map(roleId => ({
+            user_id: id,
+            role_id: roleId
+          }))
+          await trx("user_roles").insert(userRoles)
+        }
+      }
+
+      // Return updated user
+      return await User.findById(id)
+    })
   },
 
   /**
@@ -149,9 +227,41 @@ const User = {
    * @returns {Promise<boolean>} - Success status
    */
   delete: async (id) => {
-    const deleted = await db("users").where({ id }).delete()
+    return await db.transaction(async (trx) => {
+      // Delete user roles first (should cascade, but just to be safe)
+      await trx("user_roles").where({ user_id: id }).delete()
 
-    return deleted > 0
+      // Delete user
+      const deleted = await trx("users").where({ id }).delete()
+
+      return deleted > 0
+    })
+  },
+
+  /**
+   * Get user roles
+   * @param {string} id - User ID
+   * @returns {Promise<Array>} - Array of role objects
+   */
+  getRoles: async (id) => {
+    return await db("roles")
+      .join("user_roles", "roles.id", "user_roles.role_id")
+      .where("user_roles.user_id", id)
+      .select("roles.*")
+  },
+
+  /**
+   * Get user permissions
+   * @param {string} id - User ID
+   * @returns {Promise<Array>} - Array of permission objects
+   */
+  getPermissions: async (id) => {
+    return await db("permissions")
+      .join("role_permissions", "permissions.id", "role_permissions.permission_id")
+      .join("user_roles", "role_permissions.role_id", "user_roles.role_id")
+      .where("user_roles.user_id", id)
+      .select("permissions.*")
+      .distinct()
   },
 
   /**

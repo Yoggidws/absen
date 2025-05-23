@@ -123,45 +123,74 @@ exports.scanQRCode = asyncHandler(async (req, res) => {
 // @route   GET /api/attendance/history
 // @access  Private
 exports.getAttendanceHistory = asyncHandler(async (req, res) => {
-  const userId = req.params.userId || req.user.id
+  const userId = req.params.userId || req.user.id;
 
   // Check if user is requesting their own data or is an admin
   if (userId !== req.user.id && req.user.role !== "admin") {
-    res.status(403)
-    throw new Error("You can only access your own attendance records")
+    res.status(403);
+    throw new Error("You can only access your own attendance records");
   }
 
   // Query parameters for filtering
-  const { startDate, endDate, type, status } = req.query
+  const { startDate, endDate, type, status } = req.query;
 
-  // Start building query
-  let query = db("attendance").where({ user_id: userId }).orderBy("timestamp", "desc")
+  // Start building query with user join
+  let query = db("attendance as a")
+    .join("users as u", "a.user_id", "=", "u.id")
+    .select(
+      "a.*",
+      "u.name as employee_name",
+      "u.email",
+      "u.department",
+      "u.position"
+    );
+
+  // If admin and no specific userId, get all records
+  if (req.user.role === "admin" && !req.params.userId) {
+    // No user_id filter for admin viewing all records
+  } else {
+    // Filter by specific user_id
+    query = query.where("a.user_id", userId);
+  }
+
+  // Order by timestamp
+  query = query.orderBy("a.timestamp", "desc");
 
   // Apply filters if provided
   if (startDate) {
-    query = query.where("timestamp", ">=", new Date(startDate))
+    query = query.where("a.timestamp", ">=", new Date(startDate));
   }
 
   if (endDate) {
-    query = query.where("timestamp", "<=", new Date(endDate))
+    query = query.where("a.timestamp", "<=", new Date(endDate));
   }
 
   if (type) {
-    query = query.where({ type })
+    query = query.where("a.type", type);
   }
 
   if (status) {
-    query = query.where({ status })
+    query = query.where("a.status", status);
   }
 
   // Execute query
-  const attendance = await query
+  const attendance = await query;
+
+  // Process records to include check-in/check-out status
+  const processedAttendance = attendance.map(record => ({
+    ...record,
+    checkIn: record.type === "check-in",
+    checkOut: record.type === "check-out",
+    employeeName: record.employee_name,
+    timestamp: record.timestamp,
+    status: record.status || "recorded"
+  }));
 
   res.status(200).json({
     success: true,
-    count: attendance.length,
-    data: attendance,
-  })
+    count: processedAttendance.length,
+    data: processedAttendance,
+  });
 })
 
 // @desc    Get attendance summary for a user
@@ -290,8 +319,16 @@ exports.getAttendanceStats = asyncHandler(async (req, res) => {
   const start = startDate ? new Date(startDate) : defaultStartDate
   const end = endDate ? new Date(endDate) : defaultEndDate
 
-  // Start building user query
-  let userQuery = db("users").where({ active: true })
+  // Start building user query with all necessary user information
+  let userQuery = db("users")
+    .select(
+      "users.id",
+      "users.name",
+      "users.email",
+      "users.department",
+      "users.position"
+    )
+    .where({ active: true })
 
   if (department) {
     userQuery = userQuery.where({ department })
@@ -300,8 +337,18 @@ exports.getAttendanceStats = asyncHandler(async (req, res) => {
   // Get all active users
   const users = await userQuery
 
-  // Get attendance data for all users in the date range
-  const attendanceData = await db("attendance").whereBetween("timestamp", [start, end]).orderBy("timestamp", "asc")
+  // Get attendance data for all users in the date range with user information
+  const attendanceData = await db("attendance")
+    .join("users", "attendance.user_id", "=", "users.id")
+    .select(
+      "attendance.*",
+      "users.name as employee_name",
+      "users.email",
+      "users.department",
+      "users.position"
+    )
+    .whereBetween("attendance.timestamp", [start, end])
+    .orderBy("attendance.timestamp", "asc")
 
   // Calculate working days in the period
   const workingDays = getWorkingDaysInPeriod(start, end)
@@ -346,14 +393,26 @@ exports.getAttendanceStats = asyncHandler(async (req, res) => {
       }
     })
 
+    // Get today's attendance status
+    const today = new Date().toISOString().split("T")[0]
+    const todayRecords = attendanceByDay[today] || []
+    const lastRecord = todayRecords[todayRecords.length - 1]
+    
     return {
       userId: user.id,
       name: user.name,
+      email: user.email,
       department: user.department,
+      position: user.position,
+      employeeName: user.name,
       presentDays,
       absentDays: workingDays - presentDays,
       lateDays,
       attendanceRate: Math.round((presentDays / workingDays) * 100),
+      status: lastRecord ? lastRecord.status || "recorded" : "absent",
+      checkIn: todayRecords.some(r => r.type === "check-in"),
+      checkOut: todayRecords.some(r => r.type === "check-out"),
+      timestamp: lastRecord ? lastRecord.timestamp : null
     }
   })
 
@@ -380,29 +439,29 @@ exports.getAttendanceStats = asyncHandler(async (req, res) => {
   // Calculate overall statistics
   const totalUsers = users.length
   const totalPresentDays = userStats.reduce((sum, stat) => sum + stat.presentDays, 0)
-  const totalWorkingDays = totalUsers * workingDays
-  const overallAttendanceRate = Math.round((totalPresentDays / totalWorkingDays) * 100)
+  const totalAbsentDays = userStats.reduce((sum, stat) => sum + stat.absentDays, 0)
+  const totalLateDays = userStats.reduce((sum, stat) => sum + stat.lateDays, 0)
 
-  // Prepare response
-  const stats = {
-    period: {
-      startDate: start,
-      endDate: end,
-      workingDays,
-    },
-    overall: {
-      totalUsers,
-      attendanceRate: overallAttendanceRate,
-      presentDays: totalPresentDays,
-      absentDays: totalWorkingDays - totalPresentDays,
-    },
-    departments: departmentStats,
-    users: userStats,
+  const overallStats = {
+    totalUsers,
+    averageAttendanceRate: Math.round((totalPresentDays / (totalPresentDays + totalAbsentDays)) * 100),
+    totalPresentDays,
+    totalAbsentDays,
+    totalLateDays,
+    departmentStats,
   }
 
   res.status(200).json({
     success: true,
-    stats,
+    data: {
+      userStats,
+      overallStats,
+      period: {
+        start: start.toISOString(),
+        end: end.toISOString(),
+        workingDays,
+      },
+    },
   })
 })
 

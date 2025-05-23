@@ -13,7 +13,7 @@ class LeaveApprovalService {
    */
   async initializeWorkflow(leaveRequestId, userId) {
     try {
-      // Get the employee's department
+      // Get the employee's details including role and department
       const employee = await db("users").where({ id: userId }).first()
       if (!employee) {
         throw new Error("Employee not found")
@@ -41,70 +41,72 @@ class LeaveApprovalService {
         }
       }
 
-      // Find HR personnel (assuming they have a department called "HR" or "Human Resources")
-      const hrPersonnel = await db("users")
-        .where((builder) => {
-          builder.where({ department: "HR", active: true })
-            .orWhere({ department: "Human Resources", active: true })
-        })
-        .andWhere({ role: "manager" })
-        .first()
-
-      // Find an admin
-      const admin = await db("users")
+      // Find HR manager
+      const hrManager = await db("users")
         .where({
-          role: "admin",
+          department: "HR",
+          role: "manager",
           active: true,
         })
         .first()
 
-      // Create workflow steps
+      // Find owner (user with owner tag)
+      const owner = await db("users")
+        .where({
+          is_owner: true,
+          active: true,
+        })
+        .first()
+
+      // Create workflow steps based on employee role
       const workflowSteps = []
       const workflowIds = []
 
-      // Level 1: Department Manager
-      if (departmentManager) {
-        const level1Id = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
-        workflowSteps.push({
-          id: level1Id,
-          leave_request_id: leaveRequestId,
-          approval_level: 1,
-          approver_id: departmentManager.id,
-          status: "pending",
-          created_at: new Date(),
-          updated_at: new Date(),
-        })
-        workflowIds.push(level1Id)
-      }
-
-      // Level 2: HR
-      if (hrPersonnel) {
-        const level2Id = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
-        workflowSteps.push({
-          id: level2Id,
-          leave_request_id: leaveRequestId,
-          approval_level: 2,
-          approver_id: hrPersonnel.id,
-          status: "pending",
-          created_at: new Date(),
-          updated_at: new Date(),
-        })
-        workflowIds.push(level2Id)
-      }
-
-      // Level 3: Admin
-      if (admin) {
-        const level3Id = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
-        workflowSteps.push({
-          id: level3Id,
-          leave_request_id: leaveRequestId,
-          approval_level: 3,
-          approver_id: admin.id,
-          status: "pending",
-          created_at: new Date(),
-          updated_at: new Date(),
-        })
-        workflowIds.push(level3Id)
+      if (employee.role === "manager" && employee.department === "HR") {
+        // Case 3: HR Manager -> Owner
+        if (owner) {
+          const ownerId = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
+          workflowSteps.push({
+            id: ownerId,
+            leave_request_id: leaveRequestId,
+            approval_level: 1,
+            approver_id: owner.id,
+            status: "pending",
+            created_at: new Date(),
+            updated_at: new Date(),
+          })
+          workflowIds.push(ownerId)
+        }
+      } else if (employee.role === "manager") {
+        // Case 2: Department Manager -> HR Manager
+        if (hrManager) {
+          const hrId = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
+          workflowSteps.push({
+            id: hrId,
+            leave_request_id: leaveRequestId,
+            approval_level: 1,
+            approver_id: hrManager.id,
+            status: "pending",
+            created_at: new Date(),
+            updated_at: new Date(),
+          })
+          workflowIds.push(hrId)
+        }
+      } else {
+        // Case 1: Regular Employee -> Department Manager
+        if (departmentManager) {
+          const managerId = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
+          workflowSteps.push({
+            id: managerId,
+            leave_request_id: leaveRequestId,
+            approval_level: 1,
+            approver_id: departmentManager.id,
+            status: "pending",
+            created_at: new Date(),
+            updated_at: new Date(),
+          })
+          workflowIds.push(managerId)
+        }
       }
 
       // Insert workflow steps
@@ -303,30 +305,46 @@ class LeaveApprovalService {
             id: newLeaveBalanceId,
             user_id: leaveRequest.user_id,
             year: currentYear,
-            total_allowance: 20,
-            used_days: 0,
-            remaining_days: 20,
-            carried_over: 0,
-            sick_allowance: 10,
-            sick_used: 0,
-            personal_allowance: 5,
-            personal_used: 0
+            annual_leave: 12, // Default annual leave days
+            sick_leave: 14,   // Default sick leave days
+            long_leave: 90,   // Default long leave days
+            maternity_leave: 90, // Default maternity leave days
+            paternity_leave: 14, // Default paternity leave days
+            marriage_leave: 3,   // Default marriage leave days
+            death_leave: 2,      // Default death leave days
+            hajj_umrah_leave: 30 // Default hajj/umrah leave days
           })
           .returning("*")
       }
 
-      // Update the appropriate leave balance fields based on leave type
+      // Update the appropriate leave balance field based on leave type
       const updateData = {}
 
-      // Update used days and remaining days for all leave types
-      updateData.used_days = leaveBalance.used_days + diffDays
-      updateData.remaining_days = leaveBalance.total_allowance - updateData.used_days
-
-      // Update specific leave type counters
-      if (leaveRequest.type === "sick") {
-        updateData.sick_used = leaveBalance.sick_used + diffDays
-      } else if (leaveRequest.type === "personal") {
-        updateData.personal_used = leaveBalance.personal_used + diffDays
+      switch (leaveRequest.type) {
+        case "annual":
+          updateData.annual_leave = Math.max(0, leaveBalance.annual_leave - diffDays)
+          break
+        case "sick":
+          updateData.sick_leave = Math.max(0, leaveBalance.sick_leave - diffDays)
+          break
+        case "long":
+          updateData.long_leave = Math.max(0, leaveBalance.long_leave - diffDays)
+          break
+        case "maternity":
+          updateData.maternity_leave = Math.max(0, leaveBalance.maternity_leave - diffDays)
+          break
+        case "paternity":
+          updateData.paternity_leave = Math.max(0, leaveBalance.paternity_leave - diffDays)
+          break
+        case "marriage":
+          updateData.marriage_leave = Math.max(0, leaveBalance.marriage_leave - diffDays)
+          break
+        case "death":
+          updateData.death_leave = Math.max(0, leaveBalance.death_leave - diffDays)
+          break
+        case "hajj_umrah":
+          updateData.hajj_umrah_leave = Math.max(0, leaveBalance.hajj_umrah_leave - diffDays)
+          break
       }
 
       // Update the leave balance

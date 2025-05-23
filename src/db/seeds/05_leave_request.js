@@ -28,7 +28,7 @@ exports.seed = async (knex) => {
 
       const leaveRequests = []
       const now = new Date()
-      const leaveTypes = ["sick", "vacation", "personal", "other"]
+      const leaveTypes = ["annual", "sick", "other"]
       const statuses = ["pending", "approved", "rejected"]
 
       // Create some leave requests for each employee
@@ -106,19 +106,12 @@ function getReasonByLeaveType(type) {
       "Medical procedure",
       "Migraine",
     ],
-    vacation: [
+    annual: [
       "Annual family vacation",
       "Taking some time off to recharge",
       "Visiting relatives",
       "Holiday trip",
       "Personal retreat",
-    ],
-    personal: [
-      "Family matter to attend to",
-      "Personal appointment",
-      "Home emergency",
-      "Moving to a new apartment",
-      "Attending a wedding",
     ],
     other: [
       "Professional development workshop",

@@ -11,6 +11,8 @@ const {
   getLeaveBalance,
   getDepartmentOverview,
   getLeaveApprovalWorkflow,
+  getAllLeaveBalances,
+  adjustLeaveBalance
 } = require("../controllers/leaveController")
 const { protect, admin } = require("../middlewares/authMiddleware")
 
@@ -26,5 +28,9 @@ router.get("/:id", protect, getLeaveRequestById)
 router.get("/:id/workflow", protect, getLeaveApprovalWorkflow)
 router.put("/:id", protect, updateLeaveRequestStatus)
 router.put("/:id/cancel", protect, cancelLeaveRequest)
+
+// Admin routes
+router.get("/balances/all", protect, admin, getAllLeaveBalances)
+router.post("/balance/adjust", protect, admin, adjustLeaveBalance)
 
 module.exports = router

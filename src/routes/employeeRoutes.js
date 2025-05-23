@@ -8,6 +8,11 @@ const {
   updateEmployee,
   deleteEmployee,
   getEmployeeStatistics,
+  startOnboarding,
+  startOffboarding,
+  getOnboardingTasks,
+  getOffboardingTasks,
+  updateTaskStatus,
 } = require("../controllers/employeeController")
 
 // Routes
@@ -22,5 +27,16 @@ router.route("/:id")
   .get(protect, admin, getEmployeeById)
   .put(protect, admin, updateEmployee)
   .delete(protect, admin, deleteEmployee)
+
+// Onboarding routes
+router.post("/:id/onboarding/start", protect, admin, startOnboarding)
+router.get("/onboarding/tasks", protect, admin, getOnboardingTasks)
+
+// Offboarding routes
+router.post("/:id/offboarding/start", protect, admin, startOffboarding)
+router.get("/offboarding/tasks", protect, admin, getOffboardingTasks)
+
+// Task management
+router.put("/:type/tasks/:id", protect, admin, updateTaskStatus)
 
 module.exports = router

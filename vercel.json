@@ -12,23 +12,11 @@
       "dest": "src/api/index.js",
       "methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
       "headers": {
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": "${process.env.ALLOWED_ORIGINS}",
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type, Accept, Authorization, access-control-allow-methods, Access-Control-Allow-Methods, *",
-        "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Expose-Headers": "*"
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type, Accept, Authorization",
+        "Access-Control-Allow-Credentials": "true"
       }
     }
-  ],
-  "env": {
-    "NODE_ENV": "production",
-    "DB_HOST": "absensi-yoggisaputraaa-b9c8.h.aivencloud.com",
-    "DB_PORT": "22319",
-    "DB_USER": "avnadmin",
-    "DB_PASS": "AVNS_SYL3I2ooLTCRimcJmNy",
-    "DB_NAME": "absensi",
-    "DB_SSL": "true",
-    "VERCEL": "true",
-    "DEPLOY_TARGET": "vercel"
-  }
+  ]
 }

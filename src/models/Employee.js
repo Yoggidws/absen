@@ -49,8 +49,6 @@ const Employee = {
     return await db("employees").where({ email }).first()
   },
 
-
-
   /**
    * Get all employees
    * @param {Object} filters - Optional filters
@@ -59,6 +57,35 @@ const Employee = {
    * @returns {Promise<Object>} - Paginated employees
    */
   getAll: async (filters = {}, page = 1, limit = 10) => {
+    // First, get the total count with a separate query
+    const countQuery = db("employees as e")
+      .leftJoin("departments as d", "e.department_id", "d.id")
+      .leftJoin("users as u", "e.user_id", "u.id");
+
+    // Apply filters to count query
+    if (filters.department_id) {
+      countQuery.where("e.department_id", filters.department_id);
+    }
+
+    if (filters.employment_status) {
+      countQuery.where("e.employment_status", filters.employment_status);
+    }
+
+    if (filters.search) {
+      countQuery.where((builder) => {
+        builder
+          .where("e.full_name", "ilike", `%${filters.search}%`)
+          .orWhere("e.nik", "ilike", `%${filters.search}%`)
+          .orWhere("e.email", "ilike", `%${filters.search}%`)
+          .orWhere("e.position", "ilike", `%${filters.search}%`);
+      });
+    }
+
+    // Get total count
+    const { count } = await countQuery.count("e.employee_id as count").first();
+    const total = parseInt(count, 10);
+
+    // Main query for fetching employees
     const query = db("employees as e")
       .leftJoin("departments as d", "e.department_id", "d.id")
       .leftJoin("users as u", "e.user_id", "u.id")
@@ -68,15 +95,15 @@ const Employee = {
         "u.email as user_email",
         "u.role as user_role",
         "u.active as user_active"
-      )
+      );
 
-    // Apply filters if provided
+    // Apply the same filters to main query
     if (filters.department_id) {
-      query.where("e.department_id", filters.department_id)
+      query.where("e.department_id", filters.department_id);
     }
 
     if (filters.employment_status) {
-      query.where("e.employment_status", filters.employment_status)
+      query.where("e.employment_status", filters.employment_status);
     }
 
     if (filters.search) {
@@ -85,21 +112,16 @@ const Employee = {
           .where("e.full_name", "ilike", `%${filters.search}%`)
           .orWhere("e.nik", "ilike", `%${filters.search}%`)
           .orWhere("e.email", "ilike", `%${filters.search}%`)
-          .orWhere("e.position", "ilike", `%${filters.search}%`)
-      })
+          .orWhere("e.position", "ilike", `%${filters.search}%`);
+      });
     }
 
-    // Get total count
-    const totalQuery = query.clone()
-    const { count } = await totalQuery.count("e.employee_id as count").first()
-    const total = parseInt(count, 10)
-
     // Apply pagination
-    const offset = (page - 1) * limit
-    query.orderBy("e.full_name", "asc").offset(offset).limit(limit)
+    const offset = (page - 1) * limit;
+    query.orderBy("e.full_name", "asc").offset(offset).limit(limit);
 
     // Execute query
-    const employees = await query
+    const employees = await query;
 
     return {
       data: employees,
@@ -109,7 +131,7 @@ const Employee = {
         limit,
         pages: Math.ceil(total / limit),
       },
-    }
+    };
   },
 
   /**

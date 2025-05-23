@@ -7,166 +7,230 @@ const leaveApprovalService = require("../services/leaveApprovalService")
 // @route   POST /api/leave
 // @access  Private
 exports.createLeaveRequest = asyncHandler(async (req, res) => {
-  const { type, startDate, endDate, reason } = req.body
-  const userId = req.user.id
+  try {
+    console.log("Creating leave request with data:", req.body);
+    const { type, startDate, endDate, reason } = req.body
+    const userId = req.user.id
 
-  // Validate leave type
-  const validTypes = ["sick", "vacation", "personal", "other"]
-  if (!validTypes.includes(type)) {
-    res.status(400)
-    throw new Error(`Invalid leave type. Must be one of: ${validTypes.join(", ")}`)
-  }
+    console.log("User ID:", userId);
+    console.log("Leave type:", type);
+    console.log("Start date:", startDate);
+    console.log("End date:", endDate);
+    console.log("Reason:", reason);
 
-  // Validate dates
-  if (!startDate || !endDate) {
-    res.status(400)
-    throw new Error("Start date and end date are required")
-  }
-
-  const start = new Date(startDate)
-  const end = new Date(endDate)
-
-  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-    res.status(400)
-    throw new Error("Invalid date format. Please use YYYY-MM-DD format")
-  }
-
-  if (start > end) {
-    res.status(400)
-    throw new Error("Start date cannot be after end date")
-  }
-
-  // Prevent backdated leave requests
-  const today = new Date()
-  today.setHours(0, 0, 0, 0) // Set to beginning of day for fair comparison
-
-  if (start < today) {
-    res.status(400)
-    throw new Error("Cannot request leave for past dates")
-  }
-
-  // Get employee details
-  const employee = await db("users").where({ id: userId }).first()
-  if (!employee) {
-    res.status(404)
-    throw new Error("Employee not found")
-  }
-
-  // Calculate the number of days requested
-  const diffTime = Math.abs(end - start)
-  const requestedDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1 // +1 to include both start and end dates
-
-  // Get current year
-  const currentYear = new Date().getFullYear()
-
-  // Get leave balance
-  let leaveBalance = await db("leave_balance")
-    .where({
-      user_id: userId,
-      year: currentYear
-    })
-    .first()
-
-  // If no leave balance record exists, create one
-  if (!leaveBalance) {
-    const newLeaveBalanceId = `LB-${Math.random().toString(36).substring(2, 10).toUpperCase()}`
-
-    [leaveBalance] = await db("leave_balance")
-      .insert({
-        id: newLeaveBalanceId,
-        user_id: userId,
-        year: currentYear,
-        total_allowance: 20,
-        used_days: 0,
-        remaining_days: 20,
-        carried_over: 0,
-        sick_allowance: 10,
-        sick_used: 0,
-        personal_allowance: 5,
-        personal_used: 0
-      })
-      .returning("*")
-  }
-
-  // Check if requested days exceed available balance
-  if (type === "sick" && requestedDays > (leaveBalance.sick_allowance - leaveBalance.sick_used)) {
-    res.status(400)
-    throw new Error(`Requested sick leave (${requestedDays} days) exceeds your available sick leave balance (${leaveBalance.sick_allowance - leaveBalance.sick_used} days)`)
-  } else if (type === "personal" && requestedDays > (leaveBalance.personal_allowance - leaveBalance.personal_used)) {
-    res.status(400)
-    throw new Error(`Requested personal leave (${requestedDays} days) exceeds your available personal leave balance (${leaveBalance.personal_allowance - leaveBalance.personal_used} days)`)
-  } else if (requestedDays > leaveBalance.remaining_days) {
-    res.status(400)
-    throw new Error(`Requested leave (${requestedDays} days) exceeds your available leave balance (${leaveBalance.remaining_days} days)`)
-  }
-
-  // Find manager in the same department
-  let manager = null
-  if (employee.department) {
-    // First try to find department manager from departments table
-    const department = await db("departments").where({ name: employee.department }).first()
-
-    if (department && department.manager_id) {
-      manager = await db("users").where({ id: department.manager_id }).first()
+    // Validate leave type
+    const validTypes = ["sick", "vacation", "personal", "other"]
+    if (!validTypes.includes(type)) {
+      console.log("Invalid leave type:", type);
+      res.status(400)
+      throw new Error(`Invalid leave type. Must be one of: ${validTypes.join(", ")}`)
     }
 
-    // If no department manager found, find any manager in the same department
-    if (!manager) {
-      manager = await db("users")
-        .where({
-          department: employee.department,
-          role: "manager",
-          active: true,
-        })
-        .first()
+    // Validate dates
+    if (!startDate || !endDate) {
+      console.log("Missing dates - startDate:", startDate, "endDate:", endDate);
+      res.status(400)
+      throw new Error("Start date and end date are required")
     }
-  }
 
-  // If still no manager found, find any admin
-  if (!manager) {
-    manager = await db("users")
+    const start = new Date(startDate)
+    const end = new Date(endDate)
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      console.log("Invalid date format - start:", start, "end:", end);
+      res.status(400)
+      throw new Error("Invalid date format. Please use YYYY-MM-DD format")
+    }
+
+    if (start > end) {
+      console.log("Start date after end date - start:", start, "end:", end);
+      res.status(400)
+      throw new Error("Start date cannot be after end date")
+    }
+
+    // Prevent backdated leave requests
+    const today = new Date()
+    today.setHours(0, 0, 0, 0) // Set to beginning of day for fair comparison
+
+    if (start < today) {
+      console.log("Backdated request - start:", start, "today:", today);
+      res.status(400)
+      throw new Error("Cannot request leave for past dates")
+    }
+
+    // Get employee details
+    console.log("Fetching employee details for user ID:", userId);
+    const employee = await db("users").where({ id: userId }).first()
+    if (!employee) {
+      console.log("Employee not found for user ID:", userId);
+      res.status(404)
+      throw new Error("Employee not found")
+    }
+    console.log("Found employee:", employee);
+
+    // Calculate the number of days requested
+    const diffTime = Math.abs(end - start)
+    const requestedDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1 // +1 to include both start and end dates
+    console.log("Requested days:", requestedDays);
+
+    // Get current year
+    const currentYear = new Date().getFullYear()
+
+    // Get leave balance
+    console.log("Fetching leave balance for year:", currentYear);
+    let leaveBalance = await db("leave_balance")
       .where({
-        role: "admin",
-        active: true,
+        user_id: userId,
+        year: currentYear
       })
       .first()
-  }
 
-  // Generate a unique ID for the leave request
-  const leaveRequestId = "LVE-" + Math.random().toString(36).substring(2, 10).toUpperCase()
+    // If no leave balance record exists, create one
+    if (!leaveBalance) {
+      console.log("No leave balance found, creating new balance");
+      const newLeaveBalanceId = `LB-${Math.random().toString(36).substring(2, 10).toUpperCase()}`
 
-  // Create leave request
-  const [leaveRequest] = await db("leave_requests")
-    .insert({
-      id: leaveRequestId,
-      user_id: userId,
-      type,
-      start_date: start,
-      end_date: end,
-      reason,
-      status: "pending", // Will be changed to "in_progress" by the workflow service
-    })
-    .returning("*")
+      try {
+        [leaveBalance] = await db("leave_balance")
+          .insert({
+            id: newLeaveBalanceId,
+            user_id: userId,
+            year: currentYear,
+            annual_leave: 20,
+            sick_leave: 10,
+            other_leave: 5
+          })
+          .returning("*")
+        console.log("Created new leave balance:", leaveBalance);
+      } catch (error) {
+        console.error("Error creating leave balance:", error);
+        throw error;
+      }
+    }
+    console.log("Current leave balance:", leaveBalance);
 
-  // Initialize the multi-level approval workflow
-  try {
-    await leaveApprovalService.initializeWorkflow(leaveRequestId, userId)
-    console.log(`Approval workflow initialized for leave request ${leaveRequestId}`)
-  } catch (error) {
-    console.error("Failed to initialize approval workflow:", error)
-  }
+    // Check if requested days exceed available balance
+    let availableBalance = 0
+    switch (type) {
+      case "annual":
+        availableBalance = leaveBalance.annual_leave
+        break
+      case "sick":
+        availableBalance = leaveBalance.sick_leave
+        break
+      case "other":
+        availableBalance = leaveBalance.other_leave
+        break
+    }
+    console.log("Available balance for", type, "leave:", availableBalance);
 
-  res.status(201).json({
-    success: true,
-    data: leaveRequest,
-    manager: manager
-      ? {
-          id: manager.id,
-          name: manager.name,
-          email: manager.email,
+    if (requestedDays > availableBalance) {
+      console.log("Insufficient balance - requested:", requestedDays, "available:", availableBalance);
+      res.status(400)
+      throw new Error(`Requested ${type} leave (${requestedDays} days) exceeds your available balance (${availableBalance} days)`)
+    }
+
+    // Find manager in the same department
+    console.log("Finding manager for department:", employee.department);
+    let manager = null;
+    if (employee.department) {
+      try {
+        // First try to find department manager from departments table
+        const department = await db("departments")
+          .where({ name: employee.department })
+          .first();
+        console.log("Found department:", department);
+
+        if (department && department.manager_id) {
+          manager = await db("users")
+            .where({ id: department.manager_id })
+            .first();
+          console.log("Found department manager:", manager);
         }
-      : null,
-  })
+
+        // If no department manager found, find any manager in the same department
+        if (!manager) {
+          console.log("No department manager found, looking for any manager in department");
+          manager = await db("users")
+            .where({
+              department: employee.department,
+              role: "manager",
+              active: true,
+            })
+            .first();
+          console.log("Found department manager (alternative):", manager);
+        }
+      } catch (error) {
+        console.error("Error finding manager:", error);
+      }
+    }
+
+    // If still no manager found, find any admin
+    if (!manager) {
+      console.log("No manager found, looking for admin");
+      try {
+        manager = await db("users")
+          .where({
+            role: "admin",
+            active: true,
+          })
+          .first();
+        console.log("Found admin as manager:", manager);
+      } catch (error) {
+        console.error("Error finding admin:", error);
+      }
+    }
+
+    // Generate a unique ID for the leave request
+    const leaveRequestId = "LVE-" + Math.random().toString(36).substring(2, 10).toUpperCase()
+    console.log("Generated leave request ID:", leaveRequestId);
+
+    // Create leave request
+    console.log("Creating leave request");
+    let leaveRequest;
+    try {
+      [leaveRequest] = await db("leave_requests")
+        .insert({
+          id: leaveRequestId,
+          user_id: userId,
+          type,
+          start_date: start,
+          end_date: end,
+          reason,
+          status: "pending",
+        })
+        .returning("*")
+      console.log("Created leave request:", leaveRequest);
+    } catch (error) {
+      console.error("Error creating leave request:", error);
+      throw error;
+    }
+
+    // Initialize the multi-level approval workflow
+    try {
+      console.log("Initializing approval workflow");
+      await leaveApprovalService.initializeWorkflow(leaveRequestId, userId)
+      console.log("Approval workflow initialized");
+    } catch (error) {
+      console.error("Error initializing approval workflow:", error)
+      // Don't throw here, as we still want to return the created request
+    }
+
+    res.status(201).json({
+      success: true,
+      data: leaveRequest,
+      manager: manager
+        ? {
+            id: manager.id,
+            name: manager.name,
+            email: manager.email,
+          }
+        : null,
+    })
+  } catch (error) {
+    console.error("Error in createLeaveRequest:", error);
+    throw error;
+  }
 })
 
 // @desc    Get all leave requests for a user
@@ -678,14 +742,9 @@ exports.getLeaveBalance = asyncHandler(async (req, res) => {
           id: newLeaveBalanceId,
           user_id: userId,
           year: currentYear,
-          total_allowance: 20,
-          used_days: 0,
-          remaining_days: 20,
-          carried_over: 0,
-          sick_allowance: 10,
-          sick_used: 0,
-          personal_allowance: 5,
-          personal_used: 0
+          annual_leave: 20,
+          sick_leave: 10,
+          other_leave: 5
         })
         .returning("*")
     } catch (error) {
@@ -715,21 +774,22 @@ exports.getLeaveBalance = asyncHandler(async (req, res) => {
     success: true,
     data: {
       year: currentYear,
-      totalAllowance: leaveBalance.total_allowance,
-      used: leaveBalance.used_days,
-      remaining: leaveBalance.remaining_days,
+      annual: {
+        allowance: 20,
+        used: 20 - leaveBalance.annual_leave,
+        remaining: leaveBalance.annual_leave
+      },
       sick: {
-        allowance: leaveBalance.sick_allowance,
-        used: leaveBalance.sick_used,
-        remaining: leaveBalance.sick_allowance - leaveBalance.sick_used
+        allowance: 10,
+        used: 10 - leaveBalance.sick_leave,
+        remaining: leaveBalance.sick_leave
       },
-      personal: {
-        allowance: leaveBalance.personal_allowance,
-        used: leaveBalance.personal_used,
-        remaining: leaveBalance.personal_allowance - leaveBalance.personal_used
+      other: {
+        allowance: 5,
+        used: 5 - leaveBalance.other_leave,
+        remaining: leaveBalance.other_leave
       },
-      carriedOver: leaveBalance.carried_over,
-      leaveRequests: leaveRequests
+      leaveRequests
     }
   })
 })
@@ -859,6 +919,137 @@ exports.getDepartmentOverview = asyncHandler(async (req, res) => {
         position: member.position,
         leaveRequests: leaveRequests.filter(lr => lr.user_id === member.id)
       }))
+    }
+  })
+})
+
+// @desc    Get all leave balances (admin only)
+// @route   GET /api/leave/balances
+// @access  Private/Admin
+exports.getAllLeaveBalances = asyncHandler(async (req, res) => {
+  // Check if user is admin
+  if (req.user.role !== "admin") {
+    res.status(403)
+    throw new Error("Not authorized to access leave balances")
+  }
+
+  // Get current year
+  const currentYear = new Date().getFullYear()
+
+  // Get all leave balances with user information
+  const leaveBalances = await db("leave_balance as lb")
+    .join("users as u", "lb.user_id", "u.id")
+    .select(
+      "lb.*",
+      "u.name as user_name",
+      "u.email as user_email",
+      "u.department as user_department"
+    )
+    .where("lb.year", currentYear)
+    .orderBy("u.name")
+
+  res.status(200).json({
+    success: true,
+    data: leaveBalances
+  })
+})
+
+// @desc    Adjust leave balance (admin only)
+// @route   POST /api/leave/adjust-balance
+// @access  Private/Admin
+exports.adjustLeaveBalance = asyncHandler(async (req, res) => {
+  const { userId, leaveType, adjustment } = req.body
+
+  // Validate input
+  if (!userId || !leaveType || adjustment === undefined) {
+    res.status(400)
+    throw new Error("Please provide userId, leaveType, and adjustment")
+  }
+
+  // Check if user is admin
+  if (req.user.role !== "admin") {
+    res.status(403)
+    throw new Error("Not authorized to adjust leave balances")
+  }
+
+  // Get current year
+  const currentYear = new Date().getFullYear()
+
+  // Get user's leave balance
+  let leaveBalance = await db("leave_balance")
+    .where({
+      user_id: userId,
+      year: currentYear
+    })
+    .first()
+
+  // If no leave balance exists, create one with the adjustment
+  if (!leaveBalance) {
+    const newLeaveBalanceId = `LB-${Math.random().toString(36).substring(2, 10).toUpperCase()}`
+    
+    const initialBalance = {
+      id: newLeaveBalanceId,
+      user_id: userId,
+      year: currentYear,
+      annual_leave: leaveType === "annual" ? adjustment : 20,
+      sick_leave: leaveType === "sick" ? adjustment : 10,
+      other_leave: leaveType === "other" ? adjustment : 5
+    }
+
+    [leaveBalance] = await db("leave_balance")
+      .insert(initialBalance)
+      .returning("*")
+  } else {
+    // Update existing balance
+    const updateData = {}
+
+    if (leaveType === "annual") {
+      updateData.annual_leave = Math.max(0, leaveBalance.annual_leave + adjustment)
+    } else if (leaveType === "sick") {
+      updateData.sick_leave = Math.max(0, leaveBalance.sick_leave + adjustment)
+    } else if (leaveType === "other") {
+      updateData.other_leave = Math.max(0, leaveBalance.other_leave + adjustment)
+    }
+
+    updateData.updated_at = db.fn.now()
+
+    // Update the leave balance
+    ;[leaveBalance] = await db("leave_balance")
+      .where({ id: leaveBalance.id })
+      .update(updateData)
+      .returning("*")
+  }
+
+  // Get user details
+  const user = await db("users").where({ id: userId }).first()
+
+  // Add audit log
+  await db("leave_balance_audit").insert({
+    id: `LBA-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
+    leave_balance_id: leaveBalance.id,
+    adjusted_by: req.user.id,
+    adjustment_type: leaveType,
+    adjustment_amount: adjustment,
+    previous_value: leaveType === "annual" 
+      ? leaveBalance.annual_leave - adjustment
+      : leaveType === "sick"
+        ? leaveBalance.sick_leave - adjustment
+        : leaveBalance.other_leave - adjustment,
+    new_value: leaveType === "annual"
+      ? leaveBalance.annual_leave
+      : leaveType === "sick"
+        ? leaveBalance.sick_leave
+        : leaveBalance.other_leave,
+    notes: `Leave balance adjusted by ${req.user.name} (${req.user.email})`
+  })
+
+  res.status(200).json({
+    success: true,
+    data: {
+      ...leaveBalance,
+      user_name: user.name,
+      user_email: user.email,
+      user_department: user.department
     }
   })
 })

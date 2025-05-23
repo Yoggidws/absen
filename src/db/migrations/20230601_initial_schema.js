@@ -110,7 +110,7 @@ exports.up = async (knex) => {
           .onDelete("CASCADE")
           .comment("User requesting leave")
         table
-          .enum("type", ["sick", "vacation", "personal", "other"], { useNative: true, enumName: "leave_type" })
+          .enum("type", ["annual", "sick", "other"], { useNative: true, enumName: "leave_type" })
           .notNullable()
           .comment("Type of leave")
         table.date("start_date").notNullable().comment("First day of leave")

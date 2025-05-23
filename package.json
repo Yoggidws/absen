@@ -12,9 +12,11 @@
     "deploy": "npm run migrate && npm run seed && npm start",
     "docker-build": "docker build -t hris-backend .",
     "docker-run": "docker run -p 5000:5000 --env-file .env hris-backend",
-    "assign-managers": "node src/scripts/assignExistingManagers.js"
+    "assign-managers": "node src/scripts/assignExistingManagers.js",
+    "vercel-build": "npm run migrate"
   },
   "dependencies": {
+    "aws-sdk": "^2.1502.0",
     "axios": "^1.8.4",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^2.4.3",
@@ -41,5 +43,8 @@
   },
   "devDependencies": {
     "nodemon": "^2.0.22"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

@@ -5,16 +5,7 @@
   "main": "api/index.js",
   "scripts": {
     "start": "node src/api/index.js",
-    "dev": "nodemon src/api/index.js",
-    "migrate": "node src/db/migrate.js",
-    "seed": "node src/db/seed.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "deploy": "npm run migrate && npm run seed && npm start",
-    "docker-build": "docker build -t hris-backend .",
-    "docker-run": "docker run -p 5000:5000 --env-file .env hris-backend",
-    "assign-managers": "node src/scripts/assignExistingManagers.js",
-    "migrate-roles": "node src/scripts/migrate_existing_roles.js",
-    "vercel-build": "npm run migrate"
+    "dev": "nodemon src/api/index.js"
   },
   "dependencies": {
     "aws-sdk": "^2.1502.0",

@@ -10,10 +10,10 @@ exports.createLeaveRequest = asyncHandler(async (req, res) => {
   const userId = req.user.id
 
   // Validate leave type
-  const validTypes = ["sick", "vacation", "personal", "other"]
+  const validTypes = ["annual", "sick", "long", "maternity", "paternity", "marriage", "death", "hajj_umrah"]
   if (!validTypes.includes(type)) {
     res.status(400)
-    throw new Error(`Invalid leave type. Must be one of: ${validTypes.join(", ")}`)
+    throw new Error(`[NEW CONTROLLER FILE] Invalid leave type. Must be one of: ${validTypes.join(", ")}`)
   }
 
   // Validate dates
@@ -117,8 +117,8 @@ exports.createLeaveRequest = asyncHandler(async (req, res) => {
 // @access  Private
 exports.getLeaveRequests = asyncHandler(async (req, res) => {
   const userId = req.user.id
-  const isAdmin = req.user.role === "admin"
-  const isManager = req.user.role === "manager"
+  const isAdmin = req.hasRole("admin")
+  const isManager = req.hasRole("manager")
   const { status, startDate, endDate, userId: queryUserId } = req.query
 
   let query = db("leave_requests as lr")
@@ -184,8 +184,8 @@ exports.getLeaveRequests = asyncHandler(async (req, res) => {
 // @access  Private/Manager
 exports.getPendingApprovals = asyncHandler(async (req, res) => {
   const userId = req.user.id
-  const isAdmin = req.user.role === "admin"
-  const isManager = req.user.role === "manager"
+  const isAdmin = req.hasRole("admin")
+  const isManager = req.hasRole("manager")
 
   // Only managers and admins can access this endpoint
   if (!isAdmin && !isManager) {
@@ -232,8 +232,8 @@ exports.getPendingApprovals = asyncHandler(async (req, res) => {
 exports.getLeaveRequestById = asyncHandler(async (req, res) => {
   const { id } = req.params
   const userId = req.user.id
-  const isAdmin = req.user.role === "admin"
-  const isManager = req.user.role === "manager"
+  const isAdmin = req.hasRole("admin")
+  const isManager = req.hasRole("manager")
 
   // Get leave request with user details
   const leaveRequest = await db("leave_requests as lr")
@@ -282,8 +282,8 @@ exports.updateLeaveRequestStatus = asyncHandler(async (req, res) => {
   const { id } = req.params
   const { status, approvalNotes } = req.body
   const userId = req.user.id
-  const isAdmin = req.user.role === "admin"
-  const isManager = req.user.role === "manager"
+  const isAdmin = req.hasRole("admin")
+  const isManager = req.hasRole("manager")
 
   // Check if user is admin or manager
   if (!isAdmin && !isManager) {
@@ -407,7 +407,7 @@ exports.updateLeaveRequestStatus = asyncHandler(async (req, res) => {
 exports.cancelLeaveRequest = asyncHandler(async (req, res) => {
   const { id } = req.params
   const userId = req.user.id
-  const isAdmin = req.user.role === "admin"
+  const isAdmin = req.hasRole("admin")
 
   // Check if leave request exists
   const leaveRequest = await db("leave_requests").where({ id }).first()
@@ -494,7 +494,7 @@ exports.getLeaveStatistics = asyncHandler(async (req, res) => {
   const targetYear = year ? Number.parseInt(year) : currentYear
 
   // Only admins can access this endpoint
-  if (req.user.role !== "admin") {
+  if (!req.hasRole("admin")) {
     res.status(403)
     throw new Error("Not authorized to access leave statistics")
   }
@@ -651,8 +651,8 @@ exports.getLeaveBalance = asyncHandler(async (req, res) => {
 // @access  Private/Manager/Admin
 exports.getDepartmentOverview = asyncHandler(async (req, res) => {
   const userId = req.user.id
-  const isAdmin = req.user.role === "admin"
-  const isManager = req.user.role === "manager"
+  const isAdmin = req.hasRole("admin")
+  const isManager = req.hasRole("manager")
 
   // Check if user is admin or manager
   if (!isAdmin && !isManager) {

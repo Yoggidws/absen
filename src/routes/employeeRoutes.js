@@ -1,42 +1,32 @@
 const express = require("express")
 const router = express.Router()
-const { protect, admin } = require("../middlewares/authMiddleware")
 const {
+  createEmployee,
   getAllEmployees,
   getEmployeeById,
-  createEmployee,
   updateEmployee,
   deleteEmployee,
-  getEmployeeStatistics,
-  startOnboarding,
-  startOffboarding,
-  getOnboardingTasks,
-  getOffboardingTasks,
-  updateTaskStatus,
+  getEmployeeStats,
 } = require("../controllers/employeeController")
+const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
+const { rbac } = require("../middlewares/rbacMiddleware")
 
-// Routes
-router.route("/")
-  .get(protect, admin, getAllEmployees)
-  .post(protect, admin, createEmployee)
+// Manage all employees (HR/Admin)
+router
+  .route("/")
+  .post(enhancedProtect, rbac.can("create:user"), createEmployee)
+  .get(enhancedProtect, rbac.can("read:user"), getAllEmployees)
 
-router.route("/stats")
-  .get(protect, admin, getEmployeeStatistics)
+// Get employee statistics (HR/Admin)
+router
+    .route("/stats")
+    .get(enhancedProtect, rbac.can("read:user"), getEmployeeStats)
 
-router.route("/:id")
-  .get(protect, admin, getEmployeeById)
-  .put(protect, admin, updateEmployee)
-  .delete(protect, admin, deleteEmployee)
-
-// Onboarding routes
-router.post("/:id/onboarding/start", protect, admin, startOnboarding)
-router.get("/onboarding/tasks", protect, admin, getOnboardingTasks)
-
-// Offboarding routes
-router.post("/:id/offboarding/start", protect, admin, startOffboarding)
-router.get("/offboarding/tasks", protect, admin, getOffboardingTasks)
-
-// Task management
-router.put("/:type/tasks/:id", protect, admin, updateTaskStatus)
+// Manage a specific employee (HR/Admin)
+router
+  .route("/:id")
+  .get(enhancedProtect, rbac.can("read:user"), getEmployeeById)
+  .put(enhancedProtect, rbac.can("update:user"), updateEmployee)
+  .delete(enhancedProtect, rbac.can("delete:user"), deleteEmployee)
 
 module.exports = router

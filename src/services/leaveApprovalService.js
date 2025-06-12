@@ -1,5 +1,17 @@
 const { db } = require("../config/db")
 const emailUtils = require("../utils/emailUtils")
+const employeeLeaveBalanceService = require("./employeeLeaveBalanceService")
+const { v4: uuidv4 } = require("uuid")
+
+// Helper function to generate IDs that fit within 36 characters
+const generateLeaveId = (prefix = "LV") => {
+  const now = new Date()
+  const year = now.getFullYear().toString().slice(-2)
+  const month = (now.getMonth() + 1).toString().padStart(2, "0")
+  const day = now.getDate().toString().padStart(2, "0")
+  const timestamp = Date.now().toString().slice(-6) // Last 6 digits of timestamp
+  return `${prefix}${year}${month}${day}${timestamp}`
+}
 
 /**
  * Service to handle the multi-level approval workflow for leave requests
@@ -8,148 +20,113 @@ class LeaveApprovalService {
   /**
    * Initialize the approval workflow for a new leave request
    * @param {string} leaveRequestId - The ID of the leave request
-   * @param {string} userId - The ID of the user who created the request
+   * @param {string} requesterId - The ID of the user who created the request
    * @returns {Promise<Array>} - The created approval workflow steps
    */
-  async initializeWorkflow(leaveRequestId, userId) {
+  async initializeWorkflow(leaveRequestId, requesterId, trx = null) {
     try {
-      // Get the employee's details including role and department
-      const employee = await db("users").where({ id: userId }).first()
-      if (!employee) {
-        throw new Error("Employee not found")
-      }
+      const operation = async (transaction) => {
+        console.log(`Initializing workflow for request ${leaveRequestId} by user ${requesterId}`)
+        const requester = await this._getUserDetails(requesterId, transaction)
+        let nextApprover = null
+        let approverRole = null
+        let approvalLevel = 1
+        let leaveRequestStatusUpdate = { status: "pending", current_approval_level: approvalLevel }
 
-      // Find department manager
-      let departmentManager = null
-      if (employee.department) {
-        // First try to find department manager from departments table
-        const department = await db("departments").where({ name: employee.department }).first()
-
-        if (department && department.manager_id) {
-          departmentManager = await db("users").where({ id: department.manager_id }).first()
-        }
-
-        // If no department manager found, find any manager in the same department
-        if (!departmentManager) {
-          departmentManager = await db("users")
-            .where({
-              department: employee.department,
-              role: "manager",
-              active: true,
+        if (requester.is_owner || (requester.role === 'admin' && await this._isUserTheOnlyOwnerOrAdmin(requesterId, transaction))) {
+          console.log(`Requester ${requesterId} is owner/sole admin. Auto-approving.`)
+          leaveRequestStatusUpdate = { status: "approved", approved_by: requester.id, current_approval_level: approvalLevel }
+          await transaction("leave_approval_workflow").insert({
+            id: generateLeaveId("LAW"),
+            leave_request_id: leaveRequestId,
+            approval_level: approvalLevel,
+            approver_id: requester.id,
+            approver_role: "owner_auto_approved",
+            status: "approved",
+            comments: "Auto-approved as owner/sole admin.",
+            approved_at: new Date(),
+          })
+          await this.updateLeaveBalance(leaveRequestId, transaction, requester.id)
+          await this.notifyEmployee(leaveRequestId, 'approved', requester.id, approvalLevel, transaction)
+        } else {
+          const departmentManager = await this._findDepartmentManager(requester.department, transaction)
+          if (departmentManager && departmentManager.id !== requesterId) {
+            await transaction("leave_approval_workflow").insert({
+              id: generateLeaveId("LAW"),
+              leave_request_id: leaveRequestId,
+              approval_level: approvalLevel,
+              approver_id: departmentManager.id,
+              approver_role: "department_manager",
+              status: "pending",
+              comments: null,
             })
-            .first()
-        }
-      }
-
-      // Find HR manager
-      const hrManager = await db("users")
-        .where({
-          department: "HR",
-          role: "manager",
-          active: true,
-        })
-        .first()
-
-      // Find owner (user with owner tag)
-      const owner = await db("users")
-        .where({
-          is_owner: true,
-          active: true,
-        })
-        .first()
-
-      // Create workflow steps based on employee role
-      const workflowSteps = []
-      const workflowIds = []
-
-      if (employee.role === "manager" && employee.department === "HR") {
-        // Case 3: HR Manager -> Owner
-        if (owner) {
-          const ownerId = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
-          workflowSteps.push({
-            id: ownerId,
-            leave_request_id: leaveRequestId,
-            approval_level: 1,
-            approver_id: owner.id,
-            status: "pending",
-            created_at: new Date(),
-            updated_at: new Date(),
-          })
-          workflowIds.push(ownerId)
-        }
-      } else if (employee.role === "manager") {
-        // Case 2: Department Manager -> HR Manager
-        if (hrManager) {
-          const hrId = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
-          workflowSteps.push({
-            id: hrId,
-            leave_request_id: leaveRequestId,
-            approval_level: 1,
-            approver_id: hrManager.id,
-            status: "pending",
-            created_at: new Date(),
-            updated_at: new Date(),
-          })
-          workflowIds.push(hrId)
-        }
-      } else {
-        // Case 1: Regular Employee -> Department Manager
-        if (departmentManager) {
-          const managerId = "WF-" + Math.random().toString(36).substring(2, 10).toUpperCase()
-          workflowSteps.push({
-            id: managerId,
-            leave_request_id: leaveRequestId,
-            approval_level: 1,
-            approver_id: departmentManager.id,
-            status: "pending",
-            created_at: new Date(),
-            updated_at: new Date(),
-          })
-          workflowIds.push(managerId)
-        }
-      }
-
-      // Insert workflow steps
-      if (workflowSteps.length > 0) {
-        await db("leave_approval_workflow").insert(workflowSteps)
-
-        // Update leave request status to in_progress and set current approval level to 1
-        await db("leave_requests")
-          .where({ id: leaveRequestId })
-          .update({
-            status: "in_progress",
-            current_approval_level: 1,
-            updated_at: new Date(),
-          })
-
-        // Send notification to the first approver
-        if (workflowSteps.length > 0 && workflowSteps[0].approver_id) {
-          const leaveRequest = await db("leave_requests")
-            .join("users", "leave_requests.user_id", "users.id")
-            .where("leave_requests.id", leaveRequestId)
-            .select(
-              "leave_requests.*",
-              "users.name as user_name",
-              "users.email as user_email"
-            )
-            .first()
-
-          const approver = await db("users").where({ id: workflowSteps[0].approver_id }).first()
-
-          if (leaveRequest && approver) {
-            try {
-              await emailUtils.sendLeaveApprovalNotification(leaveRequest, approver, 1)
-            } catch (error) {
-              console.error("Failed to send approval notification:", error)
+          } else {
+            approvalLevel = 2
+            leaveRequestStatusUpdate.current_approval_level = approvalLevel
+            const hrManager = await this._findHRManager(transaction)
+            if (hrManager) {
+              await transaction("leave_approval_workflow").insert({
+                id: generateLeaveId("LAW"),
+                leave_request_id: leaveRequestId,
+                approval_level: approvalLevel,
+                approver_id: hrManager.id,
+                approver_role: "hr_manager",
+                status: "pending",
+                comments: null,
+              })
+            } else {
+              approvalLevel = 3
+              leaveRequestStatusUpdate.current_approval_level = approvalLevel
+              const owner = await this._findOwner(transaction)
+              if (owner) {
+                await transaction("leave_approval_workflow").insert({
+                  id: generateLeaveId("LAW"),
+                  leave_request_id: leaveRequestId,
+                  approval_level: approvalLevel,
+                  approver_id: owner.id,
+                  approver_role: "owner",
+                  status: "pending",
+                  comments: null,
+                })
+              } else {
+                leaveRequestStatusUpdate = {
+                  status: "error_no_approver",
+                  current_approval_level: 0,
+                  approval_notes: "No suitable approver found in the system."
+                }
+              }
             }
           }
         }
+
+        await transaction("leave_requests")
+          .where({ id: leaveRequestId })
+          .update(leaveRequestStatusUpdate)
+
+        return leaveRequestStatusUpdate
       }
 
-      return workflowSteps
+      if (trx) {
+        return await operation(trx)
+      } else {
+        return await db.transaction(operation)
+      }
     } catch (error) {
-      console.error("Error initializing approval workflow:", error)
-      throw error
+      console.error(`Error initializing workflow for leave request ${leaveRequestId}:`, error)
+      
+      const errorUpdate = {
+        status: "error_workflow_init",
+        current_approval_level: 0,
+        approval_notes: `Workflow initialization failed: ${error.message}`
+      }
+
+      if (trx) {
+        await trx("leave_requests").where({ id: leaveRequestId }).update(errorUpdate)
+      } else {
+        await db("leave_requests").where({ id: leaveRequestId }).update(errorUpdate)
+      }
+
+      throw new Error(`Failed to initialize approval workflow: ${error.message}`)
     }
   }
 
@@ -157,110 +134,64 @@ class LeaveApprovalService {
    * Process an approval or rejection at a specific level
    * @param {string} leaveRequestId - The ID of the leave request
    * @param {number} approvalLevel - The approval level (1, 2, or 3)
-   * @param {string} approverId - The ID of the approver
-   * @param {string} status - The new status ("approved" or "rejected")
+   * @param {string} actingUserId - The ID of the user acting as the approver
+   * @param {string} decision - The decision ("approved" or "rejected")
    * @param {string} comments - Comments from the approver
-   * @returns {Promise<Object>} - The updated leave request
+   * @returns {Promise<Object>} - The updated leave request and approval workflow history
    */
-  async processApproval(leaveRequestId, approvalLevel, approverId, status, comments) {
+  async processApproval(leaveRequestId, approvalLevel, actingUserId, decision, comments) {
     try {
-      // Get the leave request
-      const leaveRequest = await db("leave_requests").where({ id: leaveRequestId }).first()
-      if (!leaveRequest) {
-        throw new Error("Leave request not found")
-      }
-
-      // Check if this is the current approval level
-      if (leaveRequest.current_approval_level !== approvalLevel) {
-        throw new Error(`Cannot process approval at level ${approvalLevel}. Current level is ${leaveRequest.current_approval_level}`)
-      }
-
-      // Update the workflow step
-      await db("leave_approval_workflow")
-        .where({
-          leave_request_id: leaveRequestId,
-          approval_level: approvalLevel,
-        })
-        .update({
-          approver_id: approverId,
-          status: status,
-          comments: comments,
-          updated_at: new Date(),
-        })
-
-      // If rejected, update the leave request status
-      if (status === "rejected") {
-        await db("leave_requests")
-          .where({ id: leaveRequestId })
-          .update({
-            status: "rejected",
-            approved_by: approverId, // For backward compatibility
-            approval_notes: comments, // For backward compatibility
-            updated_at: new Date(),
+      const operation = async (transaction) => {
+        console.log(`Processing approval for ${leaveRequestId}, level ${approvalLevel} by ${actingUserId}, decision: ${decision}`)
+        const workflowEntry = await transaction("leave_approval_workflow")
+          .where({
+            leave_request_id: leaveRequestId,
+            approval_level: approvalLevel,
+            approver_id: actingUserId,
+            status: "pending",
           })
+          .first()
 
-        // Notify the employee
-        await this.notifyEmployee(leaveRequestId, "rejected", approverId, approvalLevel)
-
-        return await db("leave_requests").where({ id: leaveRequestId }).first()
-      }
-
-      // If approved, check if there are more levels
-      const nextLevel = approvalLevel + 1
-      const nextWorkflowStep = await db("leave_approval_workflow")
-        .where({
-          leave_request_id: leaveRequestId,
-          approval_level: nextLevel,
-        })
-        .first()
-
-      if (nextWorkflowStep) {
-        // Move to the next approval level
-        await db("leave_requests")
-          .where({ id: leaveRequestId })
-          .update({
-            current_approval_level: nextLevel,
-            updated_at: new Date(),
-          })
-
-        // Notify the next approver
-        const approver = await db("users").where({ id: nextWorkflowStep.approver_id }).first()
-        if (approver) {
-          const leaveRequestDetails = await db("leave_requests")
-            .join("users", "leave_requests.user_id", "users.id")
-            .where("leave_requests.id", leaveRequestId)
-            .select(
-              "leave_requests.*",
-              "users.name as user_name",
-              "users.email as user_email"
-            )
-            .first()
-
-          try {
-            await emailUtils.sendLeaveApprovalNotification(leaveRequestDetails, approver, nextLevel)
-          } catch (error) {
-            console.error("Failed to send approval notification:", error)
-          }
+        if (!workflowEntry) {
+          throw new Error(
+            `No pending approval found for request ${leaveRequestId} at level ${approvalLevel} for user ${actingUserId}, or user not authorized/already acted.`
+          )
         }
-      } else {
-        // Final approval, update the leave request status
-        await db("leave_requests")
+
+        await transaction("leave_approval_workflow")
+          .where({ id: workflowEntry.id })
+          .update({
+            status: decision,
+            comments: comments || null,
+            approved_at: new Date(),
+          })
+        
+        let finalLeaveStatus = decision
+        
+        await transaction("leave_requests")
           .where({ id: leaveRequestId })
           .update({
-            status: "approved",
-            approved_by: approverId, // For backward compatibility
-            approval_notes: comments, // For backward compatibility
+            status: finalLeaveStatus,
+            approved_by: actingUserId,
+            approval_notes: comments || workflowEntry.comments,
             updated_at: new Date(),
           })
+        
+        console.log(`Leave request ${leaveRequestId} status updated to ${finalLeaveStatus} by ${actingUserId}`)
 
-        // Update leave balance
-        await this.updateLeaveBalance(leaveRequestId)
+        if (finalLeaveStatus === "approved") {
+          await this.updateLeaveBalance(leaveRequestId, transaction, actingUserId)
+        }
 
-        // Notify the employee
-        await this.notifyEmployee(leaveRequestId, "approved", approverId, approvalLevel)
+        await this.notifyEmployee(leaveRequestId, decision, actingUserId, approvalLevel, transaction)
+        
+        const updatedLeaveRequest = await transaction("leave_requests").where({id: leaveRequestId}).first()
+        const approvalWorkflowHistory = await this.getApprovalWorkflow(leaveRequestId, transaction)
+
+        return { updatedLeaveRequest, approvalWorkflow: approvalWorkflowHistory }
       }
 
-      return await db("leave_requests").where({ id: leaveRequestId }).first()
+      return await db.transaction(operation)
     } catch (error) {
       console.error("Error processing approval:", error)
       throw error
@@ -271,88 +202,58 @@ class LeaveApprovalService {
    * Update the leave balance after final approval
    * @param {string} leaveRequestId - The ID of the leave request
    */
-  async updateLeaveBalance(leaveRequestId) {
+  async updateLeaveBalance(leaveRequestId, trx = null, actingUserId = null) {
+    const queryRunner = trx || db
+    const leaveRequest = await queryRunner("leave_requests")
+      .where({ id: leaveRequestId, status: "approved" })
+      .first()
+
+    if (!leaveRequest) {
+      console.log(`Leave request ${leaveRequestId} not found or not approved for balance update.`)
+      return
+    }
+
+    const startDate = new Date(leaveRequest.start_date)
+    const endDate = new Date(leaveRequest.end_date)
+    const diffTime = Math.abs(endDate - startDate)
+    const requestedDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1
+    const currentYear = startDate.getFullYear()
+
     try {
-      // Get the leave request
-      const leaveRequest = await db("leave_requests").where({ id: leaveRequestId }).first()
-      if (!leaveRequest) {
-        throw new Error("Leave request not found")
+      // **INTEGRATION POINT**: Get current leave balance from Employee System
+      let leaveBalance = await employeeLeaveBalanceService.getEmployeeLeaveBalance(leaveRequest.user_id, currentYear)
+      
+      const balanceFieldMap = {
+        "annual": "annual_leave", "sick": "sick_leave", "long": "long_leave",
+        "maternity": "maternity_leave", "paternity": "paternity_leave",
+        "marriage": "marriage_leave", "death": "death_leave", "hajj_umrah": "hajj_umrah_leave"
       }
 
-      // Calculate the number of days
-      const startDate = new Date(leaveRequest.start_date)
-      const endDate = new Date(leaveRequest.end_date)
-      const diffTime = Math.abs(endDate - startDate)
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1 // +1 to include both start and end dates
-
-      // Get the current year
-      const currentYear = new Date().getFullYear()
-
-      // Get or create leave balance record
-      let leaveBalance = await db("leave_balance")
-        .where({
-          user_id: leaveRequest.user_id,
-          year: currentYear
-        })
-        .first()
-
-      if (!leaveBalance) {
-        // Create a new leave balance record if it doesn't exist
-        const newLeaveBalanceId = `LB-${Math.random().toString(36).substring(2, 10).toUpperCase()}`
-
-        [leaveBalance] = await db("leave_balance")
-          .insert({
-            id: newLeaveBalanceId,
-            user_id: leaveRequest.user_id,
-            year: currentYear,
-            annual_leave: 12, // Default annual leave days
-            sick_leave: 14,   // Default sick leave days
-            long_leave: 90,   // Default long leave days
-            maternity_leave: 90, // Default maternity leave days
-            paternity_leave: 14, // Default paternity leave days
-            marriage_leave: 3,   // Default marriage leave days
-            death_leave: 2,      // Default death leave days
-            hajj_umrah_leave: 30 // Default hajj/umrah leave days
-          })
-          .returning("*")
+      const fieldToUpdate = balanceFieldMap[leaveRequest.type]
+      if (!fieldToUpdate || typeof leaveBalance[fieldToUpdate] === 'undefined') {
+        console.error(`Invalid leave type "${leaveRequest.type}" or balance field "${fieldToUpdate}" not configured for request ${leaveRequestId}.`)
+        return
       }
 
-      // Update the appropriate leave balance field based on leave type
-      const updateData = {}
+      const newBalanceValue = leaveBalance[fieldToUpdate] - requestedDays
 
-      switch (leaveRequest.type) {
-        case "annual":
-          updateData.annual_leave = Math.max(0, leaveBalance.annual_leave - diffDays)
-          break
-        case "sick":
-          updateData.sick_leave = Math.max(0, leaveBalance.sick_leave - diffDays)
-          break
-        case "long":
-          updateData.long_leave = Math.max(0, leaveBalance.long_leave - diffDays)
-          break
-        case "maternity":
-          updateData.maternity_leave = Math.max(0, leaveBalance.maternity_leave - diffDays)
-          break
-        case "paternity":
-          updateData.paternity_leave = Math.max(0, leaveBalance.paternity_leave - diffDays)
-          break
-        case "marriage":
-          updateData.marriage_leave = Math.max(0, leaveBalance.marriage_leave - diffDays)
-          break
-        case "death":
-          updateData.death_leave = Math.max(0, leaveBalance.death_leave - diffDays)
-          break
-        case "hajj_umrah":
-          updateData.hajj_umrah_leave = Math.max(0, leaveBalance.hajj_umrah_leave - diffDays)
-          break
-      }
-
-      // Update the leave balance
-      await db("leave_balance")
+      await queryRunner("leave_balance")
         .where({ id: leaveBalance.id })
-        .update(updateData)
+        .update({ [fieldToUpdate]: newBalanceValue })
+
+      await queryRunner("leave_balance_audit").insert({
+        id: generateLeaveId("LBA"),
+        leave_balance_id: leaveBalance.id,
+        adjusted_by: actingUserId,
+        adjustment_type: `approved_${leaveRequest.type}`,
+        adjustment_amount: -requestedDays,
+        previous_value: leaveBalance[fieldToUpdate],
+        new_value: newBalanceValue,
+        notes: `Leave request ${leaveRequestId} approved. Type: ${leaveRequest.type}, Days: ${requestedDays}`,
+      })
+      console.log(`Leave balance updated for user ${leaveRequest.user_id} due to request ${leaveRequestId}.`)
     } catch (error) {
-      console.error("Error updating leave balance:", error)
+      console.error(`Failed to update leave balance for request ${leaveRequestId}:`, error)
       throw error
     }
   }
@@ -360,45 +261,36 @@ class LeaveApprovalService {
   /**
    * Notify the employee about the status of their leave request
    * @param {string} leaveRequestId - The ID of the leave request
-   * @param {string} status - The status of the leave request
-   * @param {string} approverId - The ID of the approver
+   * @param {string} finalStatus - The final status of the leave request
+   * @param {string} actingUserId - The ID of the user acting as the approver
    * @param {number} approvalLevel - The approval level
    */
-  async notifyEmployee(leaveRequestId, status, approverId, approvalLevel) {
+  async notifyEmployee(leaveRequestId, finalStatus, actingUserId, approvalLevel, trx = null) {
+    const queryRunner = trx || db
+    const leaveRequestDetails = await queryRunner("leave_requests as lr")
+      .join("users as u_req", "lr.user_id", "u_req.id")
+      .where("lr.id", leaveRequestId)
+      .select("lr.*", "u_req.email as requester_email", "u_req.name as requester_name")
+      .first()
+
+    if (!leaveRequestDetails) {
+      console.error(`Cannot send notification: Leave request ${leaveRequestId} not found.`)
+      return
+    }
+    
+    const actingUserDetails = await this._getUserDetails(actingUserId, queryRunner)
+
     try {
-      // Get the leave request with employee details
-      const leaveRequest = await db("leave_requests")
-        .join("users as u", "leave_requests.user_id", "u.id")
-        .where("leave_requests.id", leaveRequestId)
-        .select(
-          "leave_requests.*",
-          "u.name as user_name",
-          "u.email as user_email"
-        )
-        .first()
-
-      if (!leaveRequest) {
-        throw new Error("Leave request not found")
-      }
-
-      // Get the approver details
-      const approver = await db("users").where({ id: approverId }).first()
-      if (!approver) {
-        throw new Error("Approver not found")
-      }
-
-      // Send email notification
-      try {
-        await emailUtils.sendLeaveStatusUpdate(leaveRequest, {
-          name: leaveRequest.user_name,
-          email: leaveRequest.user_email
-        }, status, approver, approvalLevel)
-      } catch (error) {
-        console.error("Failed to send leave status update:", error)
-      }
-    } catch (error) {
-      console.error("Error notifying employee:", error)
-      throw error
+      await emailUtils.sendLeaveStatusUpdate(
+        leaveRequestDetails,
+        { id: leaveRequestDetails.user_id, name: leaveRequestDetails.requester_name, email: leaveRequestDetails.requester_email },
+        finalStatus,
+        actingUserDetails,
+        approvalLevel
+      )
+      console.log(`Notification sent to ${leaveRequestDetails.requester_email} for leave request ${leaveRequestId} status: ${finalStatus}`)
+    } catch (emailError) {
+      console.error(`Failed to send leave status update email for ${leaveRequestId}:`, emailError)
     }
   }
 
@@ -407,25 +299,20 @@ class LeaveApprovalService {
    * @param {string} leaveRequestId - The ID of the leave request
    * @returns {Promise<Array>} - The approval workflow steps with approver details
    */
-  async getApprovalWorkflow(leaveRequestId) {
-    try {
-      const workflow = await db("leave_approval_workflow as law")
-        .leftJoin("users as u", "law.approver_id", "u.id")
-        .where("law.leave_request_id", leaveRequestId)
-        .orderBy("law.approval_level", "asc")
-        .select(
-          "law.*",
-          "u.name as approver_name",
-          "u.email as approver_email",
-          "u.department as approver_department",
-          "u.role as approver_role"
-        )
-
-      return workflow
-    } catch (error) {
-      console.error("Error getting approval workflow:", error)
-      throw error
-    }
+  async getApprovalWorkflow(leaveRequestId, trx = null) {
+    const queryRunner = trx || db
+    return queryRunner("leave_approval_workflow as law")
+      .join("users as u_approver", "law.approver_id", "u_approver.id")
+      .leftJoin("leave_requests as lr", "law.leave_request_id", "lr.id")
+      .leftJoin("users as u_requester", "lr.user_id", "u_requester.id")
+      .select(
+        "law.*",
+        "u_approver.name as approver_name",
+        "u_approver.email as approver_email",
+        "u_requester.name as requester_name"
+      )
+      .where("law.leave_request_id", leaveRequestId)
+      .orderBy(["law.approval_level", "law.created_at"])
   }
 
   /**
@@ -433,32 +320,91 @@ class LeaveApprovalService {
    * @param {string} userId - The ID of the user
    * @returns {Promise<Array>} - The pending approvals
    */
-  async getPendingApprovalsForUser(userId) {
-    try {
-      const pendingApprovals = await db("leave_approval_workflow as law")
-        .join("leave_requests as lr", "law.leave_request_id", "lr.id")
-        .join("users as requester", "lr.user_id", "requester.id")
-        .where("law.approver_id", userId)
-        .andWhere("law.status", "pending")
-        .andWhereRaw("lr.current_approval_level = law.approval_level") // Only show if it's the current level
-        .select(
-          "law.*",
-          "lr.type as leave_type",
-          "lr.start_date",
-          "lr.end_date",
-          "lr.reason",
-          "lr.status as leave_status",
-          "requester.name as requester_name",
-          "requester.email as requester_email",
-          "requester.department as requester_department"
-        )
-        .orderBy("lr.created_at", "desc")
+  async getPendingApprovalsForUser(userId, trx = null) {
+    const queryRunner = trx || db
+    return queryRunner("leave_approval_workflow as law")
+      .join("leave_requests as lr", "law.leave_request_id", "lr.id")
+      .join("users as u_requester", "lr.user_id", "u_requester.id")
+      .where("law.approver_id", userId)
+      .where("law.status", "pending")
+      .where("lr.status", "pending")
+      .select(
+        "lr.id",
+        "lr.user_id",
+        "lr.type",
+        "lr.start_date",
+        "lr.end_date",
+        "lr.reason",
+        "lr.status",
+        "lr.created_at",
+        "lr.current_approval_level",
+        "u_requester.name as user_name",
+        "u_requester.email as user_email",
+        "u_requester.department as user_department",
+        "law.approval_level",
+        "law.approver_role"
+      )
+      .orderBy("lr.created_at", "asc")
+  }
 
-      return pendingApprovals
-    } catch (error) {
-      console.error("Error getting pending approvals:", error)
-      throw error
+  // Helper to get user details
+  async _getUserDetails(userId, trx) {
+    const query = trx ? db("users").transacting(trx) : db("users")
+    const user = await query.where({ id: userId }).first()
+    if (!user) throw new Error(`User not found: ${userId}`)
+    return user
+  }
+
+  // Helper to find Department Manager
+  async _findDepartmentManager(departmentName, trx) {
+    if (!departmentName) return null
+    const queryDb = trx || db
+
+    const department = await queryDb("departments").where({ name: departmentName }).first()
+    if (department && department.manager_id) {
+      const designatedManager = await queryDb("users").where({ id: department.manager_id, active: true }).first()
+      if (designatedManager) return designatedManager
     }
+
+    const anyManagerInDept = await queryDb("users")
+      .where({ department: departmentName, role: "manager", active: true })
+      .first()
+    if (anyManagerInDept) return anyManagerInDept
+    
+    return null
+  }
+
+  // Helper to find HR Manager
+  async _findHRManager(trx) {
+    const queryDb = trx || db
+    const hrDeptManager = await queryDb("users")
+      .where({ department: "HR", role: "manager", active: true })
+      .first()
+    if (hrDeptManager) return hrDeptManager
+    
+    // Fallback: Any admin if no specific HR manager in HR department
+    const adminUser = await queryDb("users").where({ role: "admin", active: true }).orderBy('created_at', 'asc').first()
+    return adminUser
+  }
+
+  // Helper to find Owner
+  async _findOwner(trx) {
+    const queryDb = trx || db
+    let owner = await queryDb("users").where({ is_owner: true, active: true }).first()
+    if (owner) return owner
+
+    owner = await queryDb("users").where({ role: "admin", active: true }).orderBy('created_at', 'asc').first()
+    return owner
+  }
+  
+  async _isUserTheOnlyOwnerOrAdmin(userId, trx) {
+    const queryDb = trx || db
+    const owners = await queryDb("users").where({ is_owner: true, active: true })
+    if (owners.length > 0) {
+        return owners.length === 1 && owners[0].id === userId
+    }
+    const admins = await queryDb("users").where({ role: 'admin', active: true })
+    return admins.length === 1 && admins[0].id === userId
   }
 }
 

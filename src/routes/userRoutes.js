@@ -1,16 +1,47 @@
 const express = require("express")
-const userController = require("../controllers/UserController")
-// Change the middleware imports to match what's exported from authMiddleware.js
-const { protect, admin } = require("../middlewares/authMiddleware")
-
 const router = express.Router()
-// Update the middleware names to match what's imported
-router.get("/", protect, userController.getAllUsers)
-router.get("/:id", protect, userController.getUserById)
-router.post("/", protect, admin, userController.createUser)
-router.put("/:id", protect, admin, userController.updateUser)
-router.delete("/:id", protect, admin, userController.deleteUser)
-router.put("/:id/profile", protect, userController.updateProfile)
-router.put("/:id/change-password", protect, userController.changePassword)
+
+const {
+    getAllUsers,
+    getUserById,
+    createUser,
+    updateUser,
+    deleteUser,
+    updateProfile,
+    changePassword,
+} = require("../controllers/UserController")
+
+const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
+const { rbac } = require("../middlewares/rbacMiddleware")
+
+
+// --- Admin-facing routes for user management ---
+
+// Get all users and create a new user
+router
+    .route("/")
+    .get(enhancedProtect, rbac.can("read:user:all"), getAllUsers)
+    .post(enhancedProtect, rbac.can("create:user"), createUser)
+
+// Get, update, or delete a specific user
+router
+    .route("/:id")
+    .get(enhancedProtect, rbac.can("read:user:all"), getUserById)
+    .put(enhancedProtect, rbac.can("update:user"), updateUser)
+    .delete(enhancedProtect, rbac.can("delete:user"), deleteUser)
+
+
+// --- Routes for individual users to manage their own data ---
+
+// Update own profile information
+router
+    .route("/:id/profile")
+    .put(enhancedProtect, updateProfile)
+
+// Change own password
+router
+    .route("/:id/change-password")
+    .put(enhancedProtect, changePassword)
+
 
 module.exports = router

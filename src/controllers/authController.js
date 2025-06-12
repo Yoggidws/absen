@@ -6,6 +6,8 @@ const { asyncHandler } = require("../middlewares/errorMiddleware")
 const emailUtils = require("../utils/emailUtils")
 const { generateUserId } = require("../controllers/UserController")
 const { assignDepartmentManager, updateEmployeeDepartmentId } = require("../utils/departmentManager")
+const { loadUserAuthData } = require("../middlewares/rbacMiddleware")
+const { clearUserCache } = require("../middlewares/enhancedAuthMiddleware")
 
 // Generate JWT token
 const generateToken = (id) => {
@@ -18,7 +20,7 @@ const generateToken = (id) => {
 // @route   POST /api/auth/register
 // @access  Public
 exports.register = asyncHandler(async (req, res) => {
-  const { name, email, password, department, position } = req.body
+  const { name, email, password, department, position, role } = req.body
 
   const userExists = await db("users").where({ email }).first()
   if (userExists) {
@@ -32,6 +34,32 @@ exports.register = asyncHandler(async (req, res) => {
   // Generate a sequential ID using the same format as in UserController
   const userId = await generateUserId()
 
+  // Determine the role and corresponding role ID
+  const userRole = role || "employee"
+  let roleId
+  switch (userRole) {
+    case "admin":
+      roleId = "role_admin"
+      break
+    case "administrator":
+      roleId = "role_admin"
+      break
+    case "manager":
+      roleId = "role_manager"
+      break
+    case "hr":
+      roleId = "role_hr"
+      break
+    case "payroll":
+      roleId = "role_payroll"
+      break
+    case "hr_manager":
+      roleId = "role_hr_manager"
+      break
+    default:
+      roleId = "role_employee"
+  }
+
   // Use a transaction to ensure both user and employee are created or neither is
   await db.transaction(async (trx) => {
     // Insert user
@@ -43,8 +71,14 @@ exports.register = asyncHandler(async (req, res) => {
         password: hashedPassword,
         department,
         position,
-        role: "employee",
+        role: userRole,
       })
+
+    // Assign user to role in the role-permission system
+    await trx("user_roles").insert({
+      user_id: userId,
+      role_id: roleId,
+    })
 
     // Create basic employee record with the same ID
     // This ensures every user has an employee record for HR purposes
@@ -140,6 +174,9 @@ exports.login = asyncHandler(async (req, res) => {
     // Generate token
     const token = generateToken(user.id);
 
+    // Fetch roles and permissions
+    const authData = await loadUserAuthData(user.id);
+
     // Remove sensitive data from response
     delete user.password;
     delete user.reset_password_token;
@@ -151,7 +188,13 @@ exports.login = asyncHandler(async (req, res) => {
 
     res.status(200).json({
       success: true,
-      user,
+      user: {
+        ...authData.user, // The core user object from the DB
+        roles: authData.roles,
+        permissions: authData.permissions,
+        roleNames: authData.roleNames,
+        permissionNames: authData.permissionNames,
+      },
       token,
     });
   } catch (error) {
@@ -176,19 +219,26 @@ exports.login = asyncHandler(async (req, res) => {
 // @route   GET /api/auth/profile
 // @access  Private
 exports.getProfile = asyncHandler(async (req, res) => {
-  const user = await db("users")
-    .where({ id: req.user.id })
-    .select("id", "name", "email", "role", "department", "position", "avatar", "created_at")
-    .first()
+  // req.user and req.authData are populated by the 'enhancedProtect' middleware
+  const { user, authData } = req
 
-  if (user) {
+  if (user && authData) {
+    // Construct the same user object shape as the login response
+    const userProfile = {
+      ...authData.user, // The core user object from the DB
+      roles: authData.roles,
+      permissions: authData.permissions,
+      roleNames: authData.roleNames,
+      permissionNames: authData.permissionNames,
+    }
+
     res.status(200).json({
       success: true,
-      user,
+      user: userProfile,
     })
   } else {
     res.status(404)
-    throw new Error("User not found")
+    throw new Error("User not found or session invalid")
   }
 })
 
@@ -225,6 +275,9 @@ exports.updateProfile = asyncHandler(async (req, res) => {
     .where({ id: req.user.id })
     .update(updateData)
     .returning(["id", "name", "email", "role", "department", "position", "avatar", "created_at", "updated_at"])
+
+  // Clear permission cache for the user since their data changed
+  clearUserCache(req.user.id);
 
   // If department is changed, update the employee's department_id
   if (department) {
@@ -454,6 +507,9 @@ exports.updateUser = asyncHandler(async (req, res) => {
       "updated_at",
     ])
 
+  // Clear permission cache for the user since their roles/data may have changed
+  clearUserCache(req.params.id);
+
   // If role is changed to manager or department is changed, update department manager assignment
   if (role === 'manager' || role === 'admin' || department !== undefined) {
     const userRole = role || user.role
@@ -494,11 +550,26 @@ exports.deleteUser = asyncHandler(async (req, res) => {
     throw new Error("Cannot delete your own account")
   }
 
+  // Clear cache before deleting user
+  clearUserCache(req.params.id);
+
   // Delete user
   await db("users").where({ id: req.params.id }).del()
 
   res.status(200).json({
     success: true,
     message: "User deleted successfully",
+  })
+})
+
+// @desc    Logout user
+// @route   POST /api/auth/logout
+// @access  Private
+exports.logout = asyncHandler(async (req, res, next) => {
+  // The actual token invalidation is handled by the enhancedAuthMiddleware's logout function
+  // This controller is here to make the route consistent
+  res.status(200).json({
+    success: true,
+    message: "Logged out successfully"
   })
 })

@@ -1,136 +1,263 @@
-const { asyncHandler } = require("./errorMiddleware")
-const Permission = require("../models/Permission")
-const Role = require("../models/Role")
-
 /**
- * Middleware to check if user has a specific permission
- * @param {string} permissionName - Name of the permission to check
- * @returns {Function} - Express middleware function
+ * @deprecated This file is deprecated and will be removed.
+ * The functionality has been consolidated into rbacMiddleware.js and enhancedAuthMiddleware.js.
  */
-const hasPermission = (permissionName) => {
-  return asyncHandler(async (req, res, next) => {
-    if (!req.user) {
-      res.status(401)
-      throw new Error("Not authenticated")
-    }
+// const { db } = require("../config/db")
+// const { asyncHandler } = require("./errorMiddleware")
+// const NodeCache = require("node-cache")
 
-    const hasPermission = await Permission.userHasPermission(req.user.id, permissionName)
+// // Cache permissions for 5 minutes
+// const permissionCache = new NodeCache({ stdTTL: 300 })
 
-    if (hasPermission) {
-      next()
-    } else {
-      res.status(403)
-      throw new Error(`Permission denied: ${permissionName} required`)
-    }
-  })
-}
+// const clearCache = (userId = null) => {
+//   if (userId) {
+//     const cacheKey = `permissions_${userId}`
+//     if (permissionCache.has(cacheKey)) {
+//       permissionCache.del(cacheKey)
+//       console.log(`Cleared permission cache for user ${userId}`)
+//     }
+//   } else {
+//     permissionCache.flushAll()
+//     console.log("Cleared all permission cache")
+//   }
+// }
 
-/**
- * Middleware to check if user has any of the specified permissions
- * @param {Array<string>} permissionNames - Array of permission names to check
- * @returns {Function} - Express middleware function
- */
-const hasAnyPermission = (permissionNames) => {
-  return asyncHandler(async (req, res, next) => {
-    if (!req.user) {
-      res.status(401)
-      throw new Error("Not authenticated")
-    }
+// const fetchUserRolesAndPermissions = async (userId) => {
+//   const cacheKey = `permissions_${userId}`
+//   const cachedData = permissionCache.get(cacheKey)
+//   if (cachedData) {
+//     return cachedData
+//   }
 
-    const hasPermission = await Permission.userHasAnyPermission(req.user.id, permissionNames)
+//   const userWithRoles = await db("users")
+//     .leftJoin("user_roles", "users.id", "user_roles.user_id")
+//     .leftJoin("roles", "user_roles.role_id", "roles.id")
+//     .where("users.id", userId)
+//     .select("users.*", "roles.name as role_name")
 
-    if (hasPermission) {
-      next()
-    } else {
-      res.status(403)
-      throw new Error(`Permission denied: One of [${permissionNames.join(", ")}] required`)
-    }
-  })
-}
+//   if (!userWithRoles || userWithRoles.length === 0) {
+//     return { user: null, roles: [], permissions: [] }
+//   }
 
-/**
- * Middleware to check if user has all of the specified permissions
- * @param {Array<string>} permissionNames - Array of permission names to check
- * @returns {Function} - Express middleware function
- */
-const hasAllPermissions = (permissionNames) => {
-  return asyncHandler(async (req, res, next) => {
-    if (!req.user) {
-      res.status(401)
-      throw new Error("Not authenticated")
-    }
+//   const user = { ...userWithRoles[0] }
+//   delete user.role_name
+//   const roles = [...new Set(userWithRoles.map((r) => r.role_name).filter(Boolean))]
 
-    const hasPermissions = await Permission.userHasAllPermissions(req.user.id, permissionNames)
+//   // Get permissions for roles
+//   const rolePermissions = await db("roles")
+//     .join("role_permissions", "roles.id", "role_permissions.role_id")
+//     .join("permissions", "role_permissions.permission_id", "permissions.id")
+//     .whereIn(
+//       "roles.name",
+//       roles.map((r) => r.toLowerCase()),
+//     )
+//     .select("permissions.name as permission_name")
 
-    if (hasPermissions) {
-      next()
-    } else {
-      res.status(403)
-      throw new Error(`Permission denied: All of [${permissionNames.join(", ")}] required`)
-    }
-  })
-}
+//   const permissions = [...new Set(rolePermissions.map((p) => p.permission_name))]
 
-/**
- * Middleware to check if user has a specific role
- * @param {string} roleName - Name of the role to check
- * @returns {Function} - Express middleware function
- */
-const hasRole = (roleName) => {
-  return asyncHandler(async (req, res, next) => {
-    if (!req.user) {
-      res.status(401)
-      throw new Error("Not authenticated")
-    }
+//   const authData = { user, roles, permissions }
+//   permissionCache.set(cacheKey, authData)
 
-    const hasRole = await Role.userHasRole(req.user.id, roleName)
+//   return authData
+// }
 
-    if (hasRole) {
-      next()
-    } else {
-      res.status(403)
-      throw new Error(`Role required: ${roleName}`)
-    }
-  })
-}
+// const hasPermission = (permissionName) => {
+//   return asyncHandler(async (req, res, next) => {
+//     if (!req.user) {
+//       res.status(401)
+//       throw new Error("Not authenticated")
+//     }
 
-/**
- * Middleware to check if user has any of the specified roles
- * @param {Array<string>} roleNames - Array of role names to check
- * @returns {Function} - Express middleware function
- */
-const hasAnyRole = (roleNames) => {
-  return asyncHandler(async (req, res, next) => {
-    if (!req.user) {
-      res.status(401)
-      throw new Error("Not authenticated")
-    }
+//     // Admins have all permissions
+//     if (req.user.role === "admin") {
+//       return next()
+//     }
 
-    const hasRole = await Role.userHasAnyRole(req.user.id, roleNames)
+//     // Check if permission exists in user's permissions array
+//     if (req.user.permissions && req.user.permissions.includes(permissionName)) {
+//       return next()
+//     }
 
-    if (hasRole) {
-      next()
-    } else {
-      res.status(403)
-      throw new Error(`Role required: One of [${roleNames.join(", ")}]`)
-    }
-  })
-}
+//     // Dynamic permission check based on ownership (e.g., "read:profile:own")
+//     if (permissionName.endsWith(":own")) {
+//       const resourceId = req.params.id
+//       const userId = req.user.id
 
-// Convenience middleware for common role combinations
-const isAdmin = hasRole("admin")
-const isManager = hasAnyRole(["admin", "manager", "hr_manager"])
-const isHR = hasAnyRole(["admin", "hr", "hr_manager"])
-const isPayroll = hasAnyRole(["admin", "payroll"])
+//       if (resourceId === userId) {
+//         const basePermission = permissionName.replace(":own", ":all")
+//         if (req.user.permissions && req.user.permissions.includes(basePermission)) {
+//           return next()
+//         }
+//       }
+//     }
 
-module.exports = {
-  hasPermission,
-  hasAnyPermission,
-  hasAllPermissions,
-  hasRole,
-  hasAnyRole,
-  isAdmin,
-  isManager,
-  isHR,
-  isPayroll
-}
+//     // Fallback to fetching permissions if not on user object
+//     try {
+//       const { permissions } = await fetchUserRolesAndPermissions(req.user.id)
+//       if (permissions.includes(permissionName)) {
+//         // Optionally attach permissions to req.user for subsequent checks
+//         req.user.permissions = permissions
+//         return next()
+//       }
+
+//       res.status(403)
+//       throw new Error(`Forbidden: You lack the '${permissionName}' permission.`)
+//     } catch (error) {
+//       next(error)
+//     }
+//   })
+// }
+
+// const hasAnyPermission = (permissionNames) => {
+//   return asyncHandler(async (req, res, next) => {
+//     if (!req.user) {
+//       res.status(401)
+//       throw new Error("Not authenticated")
+//     }
+
+//     // Admins have all permissions
+//     if (req.user.role === "admin") {
+//       return next()
+//     }
+
+//     // Check for any matching permission
+//     if (req.user.permissions && permissionNames.some((p) => req.user.permissions.includes(p))) {
+//       return next()
+//     }
+
+//     // Dynamic ownership check
+//     const hasOwnershipPermission = permissionNames.some((p) => {
+//       if (p.endsWith(":own")) {
+//         const resourceId = req.params.id
+//         const userId = req.user.id
+//         return resourceId === userId
+//       }
+//       return false
+//     })
+
+//     if (hasOwnershipPermission) {
+//       return next()
+//     }
+
+//     // Fallback to fetching permissions
+//     try {
+//       const { permissions } = await fetchUserRolesAndPermissions(req.user.id)
+//       if (permissionNames.some((p) => permissions.includes(p))) {
+//         req.user.permissions = permissions
+//         return next()
+//       }
+//       res.status(403)
+//       throw new Error(`Forbidden: You need one of the following permissions: ${permissionNames.join(", ")}.`)
+//     } catch (error) {
+//       next(error)
+//     }
+//   })
+// }
+
+// const hasAllPermissions = (permissionNames) => {
+//   return asyncHandler(async (req, res, next) => {
+//     if (!req.user) {
+//       res.status(401)
+//       throw new Error("Not authenticated")
+//     }
+
+//     // Admins have all permissions
+//     if (req.user.role === "admin") {
+//       return next()
+//     }
+
+//     // Check for all required permissions
+//     if (req.user.permissions && permissionNames.every((p) => req.user.permissions.includes(p))) {
+//       return next()
+//     }
+
+//     // Fallback to fetching permissions
+//     try {
+//       const { permissions } = await fetchUserRolesAndPermissions(req.user.id)
+//       if (permissionNames.every((p) => permissions.includes(p))) {
+//         req.user.permissions = permissions
+//         return next()
+//       }
+//       res.status(403)
+//       throw new Error(`Forbidden: You need all of the following permissions: ${permissionNames.join(", ")}.`)
+//     } catch (error) {
+//       next(error)
+//     }
+//   })
+// }
+
+// const hasRole = (roleName) => {
+//   return asyncHandler(async (req, res, next) => {
+//     if (!req.user) {
+//       res.status(401)
+//       throw new Error("Not authenticated")
+//     }
+
+//     // Check single role
+//     if (req.user.role === roleName) {
+//       return next()
+//     }
+
+//     // Check roles array
+//     if (req.user.roles && req.user.roles.includes(roleName)) {
+//       return next()
+//     }
+
+//     // Fallback to fetching roles
+//     try {
+//       const { roles } = await fetchUserRolesAndPermissions(req.user.id)
+//       if (roles.includes(roleName)) {
+//         req.user.roles = roles
+//         return next()
+//       }
+
+//       res.status(403)
+//       throw new Error(`Forbidden: You must have the '${roleName}' role.`)
+//     } catch (error) {
+//       next(error)
+//     }
+//   })
+// }
+
+// const hasAnyRole = (roleNames) => {
+//   return asyncHandler(async (req, res, next) => {
+//     if (!req.user) {
+//       res.status(401)
+//       throw new Error("Not authenticated")
+//     }
+
+//     // Check single role
+//     if (roleNames.includes(req.user.role)) {
+//       return next()
+//     }
+
+//     // Check roles array
+//     if (req.user.roles && roleNames.some((r) => req.user.roles.includes(r))) {
+//       return next()
+//     }
+
+//     // Fallback to fetching roles
+//     try {
+//       const { roles } = await fetchUserRolesAndPermissions(req.user.id)
+//       if (roleNames.some((r) => roles.includes(r))) {
+//         req.user.roles = roles
+//         return next()
+//       }
+
+//       res.status(403)
+//       throw new Error(`Forbidden: You must have one of the following roles: ${roleNames.join(", ")}.`)
+//     } catch (error) {
+//       next(error)
+//     }
+//   })
+// }
+
+// module.exports = {
+//   clearCache,
+//   fetchUserRolesAndPermissions,
+//   hasPermission,
+//   hasAnyPermission,
+//   hasAllPermissions,
+//   hasRole,
+//   hasAnyRole,
+// }

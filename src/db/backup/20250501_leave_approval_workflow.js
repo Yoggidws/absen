@@ -25,12 +25,14 @@ exports.up = async (knex) => {
         .inTable("users")
         .onDelete("SET NULL")
         .comment("User who approved/rejected at this level")
+      table.string("approver_role", 50).nullable().comment("Role of the approver (department_manager, hr_manager, owner, etc.)")
       table
         .enum("status", ["pending", "approved", "rejected"], { useNative: true, enumName: "approval_status_type" })
         .notNullable()
         .defaultTo("pending")
         .comment("Status of this approval level")
       table.text("comments").nullable().comment("Comments from approver")
+      table.timestamp("approved_at", { useTz: true }).nullable().comment("When this level was approved/rejected")
       table.timestamp("created_at", { useTz: true }).notNullable().defaultTo(knex.fn.now())
       table.timestamp("updated_at", { useTz: true }).notNullable().defaultTo(knex.fn.now())
 

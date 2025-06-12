@@ -12,13 +12,16 @@ const {
   updateDocument,
   deleteDocument,
   getDocumentStats,
+  getSignedUrlForDocument,
+  getDocumentsForUser,
 } = require("../controllers/documentController")
-const { protect, admin } = require("../middlewares/authMiddleware")
+const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
+const { rbac } = require("../middlewares/rbacMiddleware")
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, "../../uploads")
+    const uploadDir = path.join(__dirname, "../../uploads/documents")
     // Create directory if it doesn't exist
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true })
@@ -60,12 +63,15 @@ const upload = multer({
 })
 
 // Protected routes
-router.post("/", protect, upload.single("file"), uploadDocument)
-router.get("/", protect, getDocuments)
-router.get("/stats", protect, admin, getDocumentStats)
-router.get("/:id", protect, getDocumentById)
-router.get("/:id/download", protect, downloadDocument)
-router.put("/:id", protect, updateDocument)
-router.delete("/:id", protect, deleteDocument)
+router.post("/", enhancedProtect, rbac.can("upload:document:own"), upload.single("file"), uploadDocument)
+router.get("/", enhancedProtect, rbac.can("read:document:all"), getDocuments)
+router.get("/stats", enhancedProtect, rbac.can("read:document:all"), getDocumentStats)
+router.get("/:id", enhancedProtect, getDocumentById)
+router.get("/:id/download", enhancedProtect, downloadDocument)
+router.put("/:id", enhancedProtect, rbac.can("update:document:own"), updateDocument)
+router.delete("/:id", enhancedProtect, rbac.can("delete:document:own"), deleteDocument)
+router.get("/me", enhancedProtect, rbac.can("read:document:own"), getDocuments)
+router.get("/user/:userId", enhancedProtect, rbac.can("read:document:all"), getDocumentsForUser)
+router.get("/:id/signed-url", enhancedProtect, getSignedUrlForDocument)
 
 module.exports = router

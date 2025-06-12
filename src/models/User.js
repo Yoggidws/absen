@@ -129,8 +129,8 @@ const User = {
 
     // Start a transaction
     return await db.transaction(async (trx) => {
-      // Insert user
-      const [userId] = await trx("users").insert({
+      // Insert user - include id if provided
+      const insertData = {
         name: userData.name,
         email: userData.email,
         password: hashedPassword,
@@ -142,7 +142,14 @@ const User = {
         phone: userData.phone,
         emergency_contact: userData.emergencyContact,
         address: userData.address,
-      }).returning("id")
+      }
+
+      // Include id if provided in userData
+      if (userData.id) {
+        insertData.id = userData.id
+      }
+
+      const [userId] = await trx("users").insert(insertData).returning("id")
 
       // Assign roles to user, ensuring no duplicates
       if (roles && roles.length > 0) {

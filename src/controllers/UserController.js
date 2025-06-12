@@ -1,449 +1,231 @@
-const bcrypt = require("bcrypt")
+const bcrypt = require("bcryptjs")
 const { db } = require("../config/db")
+const { asyncHandler } = require("../middlewares/errorMiddleware")
+const { clearCache } = require("../middlewares/permissionMiddleware")
 const { assignDepartmentManager, updateEmployeeDepartmentId } = require("../utils/departmentManager")
 const User = require("../models/User")
 const Role = require("../models/Role")
 
-async function generateUserId() {
-  // Get the last 2 digits of the current year
-  const currentDate = new Date()
-  const yearPart = currentDate.getFullYear().toString().slice(-2)
-
-  // Get the month as 2 digits (01-12)
-  const monthPart = (currentDate.getMonth() + 1).toString().padStart(2, '0')
-
-  // Create the prefix for the current year and month with 3 zeros
-  const prefix = `${yearPart}${monthPart}`
-
-  // Get the latest user ID for the current year and month
-  const result = await db.raw(`SELECT id FROM users WHERE id::TEXT LIKE '${yearPart}${monthPart}%' ORDER BY id DESC LIMIT 1`)
-
+/**
+ * Generates a unique, sequential user ID with a '2505' prefix.
+ * @returns {Promise<string>} The newly generated user ID.
+ */
+const generateUserId = async () => {
+  const result = await db.raw(`SELECT id FROM users WHERE id::TEXT LIKE '2505%' ORDER BY id DESC LIMIT 1`)
   let newId
   if (result.rows.length === 0) {
-    // If no users exist for this year and month, start from 0001
-    newId = `${prefix}0001`
+    newId = '25050001'
   } else {
-    // Extract the sequential part (last 4 digits) and increment
     const lastId = result.rows[0].id
-    const sequentialPart = lastId.slice(-4) // Get the last 4 digits
-    const nextNum = (parseInt(sequentialPart) + 1).toString().padStart(4, '0')
-    newId = `${yearPart}${monthPart}0${nextNum}`
+    const numericPart = lastId.substring(4)
+    const nextNum = (parseInt(numericPart, 10) + 1).toString().padStart(4, '0')
+    newId = `2505${nextNum}`
   }
-
   return newId
 }
 
-// Export the generateUserId function
-exports.generateUserId = generateUserId
+/**
+ * @desc    Get all users
+ * @route   GET /api/users
+ * @access  Private (read:user:all)
+ */
+const getAllUsers = asyncHandler(async (req, res) => {
+  const users = await db("users").select("id", "name", "email", "role", "active", "department", "position").orderBy("name")
+  res.status(200).json({ success: true, count: users.length, data: users })
+})
 
-exports.getAllUsers = async (req, res) => {
-  try {
-    const { page = 1, limit = 100, search = "" } = req.query
-    const offset = (page - 1) * limit
-
-    // Use the db object directly for queries
-    const query = db("users")
-      .select("id", "name", "email", "role", "department", "position", "active", "created_at")
-      .limit(limit)
-      .offset(offset)
-
-    if (search) {
-      query.where("name", "ilike", `%${search}%`).orWhere("email", "ilike", `%${search}%`)
-    }
-
-    const users = await query
-
-    // Get roles for each user
-    const usersWithRoles = await Promise.all(
-      users.map(async (user) => {
-        const roles = await User.getRoles(user.id)
-        return {
-          ...user,
-          roles
-        }
-      })
-    )
-
-    // Get total count for pagination
-    const countQuery = db("users").count("id as count")
-    if (search) {
-      countQuery.where("name", "ilike", `%${search}%`).orWhere("email", "ilike", `%${search}%`)
-    }
-
-    const { count } = await countQuery.first()
-
-    res.json({
-      users: usersWithRoles,
-      total: Number.parseInt(count),
-      page: Number.parseInt(page),
-      limit: Number.parseInt(limit),
-      totalPages: Math.ceil(Number.parseInt(count) / limit),
-    })
-  } catch (error) {
-    res.status(500).json({ error: error.message })
+/**
+ * @desc    Get user by ID
+ * @route   GET /api/users/:id
+ * @access  Private (read:user:all or read:user:own)
+ */
+const getUserById = asyncHandler(async (req, res) => {
+  const { id } = req.params
+  
+  // A user should be able to get their own data, or an admin can get any.
+  if (req.user.id !== id && !req.user.permissions.includes("read:user:all")) {
+      res.status(403)
+      throw new Error("Forbidden: You do not have permission to view this user's data.")
   }
-}
 
-exports.getUserById = async (req, res) => {
-  try {
-    const user = await db("users")
-      .where({ id: req.params.id })
-      .select(
-        "id",
-        "name",
-        "email",
-        "role",
-        "department",
-        "position",
-        "active",
-        "created_at",
-        "phone",
-        "emergency_contact",
-        "address"
-      )
-      .first()
-
-    if (!user) return res.status(404).json({ message: "User not found" })
-
-    // Get user roles and permissions
-    const roles = await User.getRoles(req.params.id)
-    const permissions = await User.getPermissions(req.params.id)
-
-    res.json({
-      ...user,
-      roles,
-      permissions
-    })
-  } catch (error) {
-    res.status(500).json({ error: error.message })
+  const user = await db("users").where({ id }).select("-password").first()
+  if (!user) {
+    res.status(404)
+    throw new Error("User not found")
   }
-}
+  res.status(200).json({ success: true, data: user })
+})
 
-exports.createUser = async (req, res) => {
-  try {
-    const { 
-      name, 
-      email, 
-      password, 
-      role, 
-      department, 
-      position, 
-      roles,
-      phone,
-      emergencyContact,
-      address 
-    } = req.body
+/**
+ * @desc    Create a new user
+ * @route   POST /api/users
+ * @access  Private (create:user)
+ */
+const createUser = asyncHandler(async (req, res) => {
+  const { name, email, password, role, department, position } = req.body
 
-    if (!password) {
-      return res.status(400).json({ error: "Password is required" })
-    }
+  const userExists = await db("users").where({ email }).first()
+  if (userExists) {
+    res.status(400)
+    throw new Error("User with that email already exists")
+  }
 
-    // Check if email already exists
-    const existingUser = await db("users").where({ email }).first()
-    if (existingUser) {
-      return res.status(400).json({ error: "Email already in use" })
-    }
+  const salt = await bcrypt.genSalt(10)
+  const hashedPassword = await bcrypt.hash(password, salt)
+  const userId = await generateUserId()
+  const userRole = role || "employee"
+  
+  const roleMap = {
+      "admin": "role_admin",
+      "manager": "role_manager",
+      "hr": "role_hr",
+      "payroll": "role_payroll",
+      "employee": "role_employee"
+  };
+  const roleId = roleMap[userRole] || "role_employee";
 
-    const userId = await generateUserId() // Generate ID based on year
-
-    // Determine roles to assign
-    let rolesToAssign = []
-
-    if (roles && Array.isArray(roles) && roles.length > 0) {
-      // Use roles from request if provided
-      rolesToAssign = roles
-    } else if (role) {
-      // Map legacy role to new role IDs
-      switch (role) {
-        case "admin":
-          rolesToAssign = ["role_admin"]
-          break
-        case "manager":
-          rolesToAssign = ["role_manager"]
-          break
-        case "hr":
-          rolesToAssign = ["role_hr"]
-          break
-        case "payroll":
-          rolesToAssign = ["role_payroll"]
-          break
-        case "hr_manager":
-          rolesToAssign = ["role_hr_manager"]
-          break
-        default:
-          rolesToAssign = ["role_employee"]
-      }
-    } else {
-      // Default to employee role
-      rolesToAssign = ["role_employee"]
-    }
-
-    // Create user data object
-    const userData = {
+  await db.transaction(async (trx) => {
+    const [newUser] = await trx("users").insert({
       id: userId,
       name,
       email,
-      password,
-      role: role || "employee", // Keep for backward compatibility
-      department: department || null,
-      position: position || null,
-      active: true,
-      phone: phone || null,
-      emergencyContact: emergencyContact || null,
-      address: address || null,
-    }
+      password: hashedPassword,
+      role: userRole,
+      department,
+      position
+    }).returning("*")
 
-    // Use a transaction to ensure both user and employee are created or neither is
-    await db.transaction(async (trx) => {
-      // Create user with roles
-      await User.create(userData, rolesToAssign)
-
-      // Create basic employee record with the same ID
-      await trx("employees")
-        .insert({
-          employee_id: userId,
-          full_name: name,
-          gender: "other", // Default value, to be updated later
-          place_of_birth: "",
-          date_of_birth: new Date("1900-01-01"), // Default value, to be updated later
-          address: "",
-          phone_number: "",
-          email: email,
-          marital_status: "single", // Default value, to be updated later
-          number_of_children: 0,
-          position: position || "",
-          department: department || "",
-          department_id: null, // To be updated later
-          hire_date: new Date(), // Current date as hire date
-          employment_status: "permanent",
-          basic_salary: 0, // To be updated later
-          allowance: 0,
-          profile_picture: null,
-          user_id: userId
-        })
+    await trx("user_roles").insert({
+        user_id: userId,
+        role_id: roleId
     })
-
-    // Get the created user with roles and permissions
-    const newUser = await db("users")
-      .where({ id: userId })
-      .select(["id", "name", "email", "role", "department", "position", "active", "created_at"])
-      .first()
-
-    // Add roles and permissions to response
-    const userRoles = await User.getRoles(userId)
-    const userPermissions = await User.getPermissions(userId)
-
-    // If the user is a manager, automatically assign them as department manager
-    if (role === 'manager' || role === 'admin' || rolesToAssign.includes("role_manager") || rolesToAssign.includes("role_admin") || rolesToAssign.includes("role_hr_manager")) {
-      await assignDepartmentManager(userId, role, department)
-    }
-
-    // Update the employee's department_id based on the department name
-    if (department) {
-      await updateEmployeeDepartmentId(userId, department)
-    }
-
-    res.status(201).json({
-      ...newUser,
-      roles: userRoles,
-      permissions: userPermissions
-    })
-  } catch (error) {
-    console.error("Error creating user:", error)
-    res.status(500).json({ error: error.message })
-  }
-}
-
-exports.updateUser = async (req, res) => {
-  try {
-    const { name, email, role, department, position, active, roles } = req.body
-
-    // Check if user exists
-    const user = await db("users").where({ id: req.params.id }).first()
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
-    }
-
-    // Prepare update data
-    const updateData = {}
-    if (name) updateData.name = name
-    if (email) updateData.email = email
-    if (role) updateData.role = role // Keep for backward compatibility
-    if (department !== undefined) updateData.department = department
-    if (position !== undefined) updateData.position = position
-    if (active !== undefined) updateData.active = active
-    updateData.updated_at = new Date()
-
-    // Determine roles to assign if provided
-    let rolesToAssign = null
-
-    if (roles && Array.isArray(roles) && roles.length > 0) {
-      // Use roles from request if provided
-      rolesToAssign = roles
-    } else if (role && role !== user.role) {
-      // Map legacy role to new role IDs if role is changed
-      switch (role) {
-        case "admin":
-          rolesToAssign = ["role_admin"]
-          break
-        case "manager":
-          rolesToAssign = ["role_manager"]
-          break
-        case "hr":
-          rolesToAssign = ["role_hr"]
-          break
-        case "payroll":
-          rolesToAssign = ["role_payroll"]
-          break
-        case "hr_manager":
-          rolesToAssign = ["role_hr_manager"]
-          break
-        default:
-          rolesToAssign = ["role_employee"]
-      }
-    }
-
-    // Update user and roles if needed
-    await User.update(req.params.id, updateData, rolesToAssign)
-
-    // Get updated user with roles and permissions
-    const updatedUser = await db("users")
-      .where({ id: req.params.id })
-      .select(["id", "name", "email", "role", "department", "position", "active", "created_at"])
-      .first()
-
-    // Add roles and permissions to response
-    const userRoles = await User.getRoles(req.params.id)
-    const userPermissions = await User.getPermissions(req.params.id)
-
-    // If role is changed to manager or department is changed, update department manager assignment
-    if (role === 'manager' || role === 'admin' ||
-        (rolesToAssign && (rolesToAssign.includes("role_manager") || rolesToAssign.includes("role_admin") || rolesToAssign.includes("role_hr_manager"))) ||
-        department !== undefined) {
-
-      const userRole = role || user.role
-      const userDepartment = department !== undefined ? department : user.department
-
-      // If user is a manager and has a department, try to assign as department manager
-      if ((userRole === 'manager' || userRole === 'admin' ||
-          (rolesToAssign && (rolesToAssign.includes("role_manager") || rolesToAssign.includes("role_admin") || rolesToAssign.includes("role_hr_manager")))) &&
-          userDepartment) {
-        await assignDepartmentManager(req.params.id, userRole, userDepartment)
-      }
-    }
-
-    // If department is changed, update the employee's department_id
-    if (department !== undefined) {
-      await updateEmployeeDepartmentId(req.params.id, department)
-    }
-
-    res.json({
-      ...updatedUser,
-      roles: userRoles,
-      permissions: userPermissions
-    })
-  } catch (error) {
-    console.error("Error updating user:", error)
-    res.status(500).json({ error: error.message })
-  }
-}
-
-exports.deleteUser = async (req, res) => {
-  try {
-    // Check if user exists
-    const user = await db("users").where({ id: req.params.id }).first()
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
-    }
-
-    await db("users").where({ id: req.params.id }).delete()
-    res.json({ message: "User deleted successfully" })
-  } catch (error) {
-    res.status(500).json({ error: error.message })
-  }
-}
-
-exports.updateProfile = async (req, res) => {
-  try {
-    const userId = req.params.id
-    const { name, phone, emergencyContact, address } = req.body
-
-    // Validate required fields
-    if (!name || name.trim() === "") {
-      return res.status(400).json({ message: "Name is required" })
-    }
-
-    // Only send the fields that should be updated in the profile
-    const updateData = {
-      name: name.trim(),
-      phone: phone?.trim() || null,
-      emergencyContact: emergencyContact?.trim() || null,
-      address: address?.trim() || null,
-    }
-
-    // Update user profile
-    const updatedUser = await User.update(userId, updateData)
-
-    // Return updated user data with camelCase field names for frontend consistency
-    res.json({
-      user: {
-        ...updatedUser,
-        phone: updatedUser.phone || "",
-        emergencyContact: updatedUser.emergency_contact || "",
-        address: updatedUser.address || "",
-      }
-    })
-  } catch (error) {
-    console.error("Error updating profile:", error)
-    res.status(500).json({ error: error.message })
-  }
-}
-
-exports.changePassword = async (req, res) => {
-  try {
-    const userId = req.params.id;
-
-    // Only allow users to change their own password unless they're an admin
-    if (req.user.id !== userId && req.user.role !== 'admin') {
-      return res.status(403).json({ message: "Not authorized to change this user's password" });
-    }
-
-    const { currentPassword, newPassword } = req.body;
-
-    // Validate input
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ message: "Current password and new password are required" });
-    }
-
-    // Check if user exists
-    const user = await db("users").where({ id: userId }).first();
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Verify current password
-    const isMatch = await bcrypt.compare(currentPassword, user.password);
-    if (!isMatch) {
-      return res.status(400).json({ message: "Current password is incorrect" });
-    }
-
-    // Hash new password
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    // Update password
-    await db("users")
-      .where({ id: userId })
-      .update({
-        password: hashedPassword,
-        updated_at: new Date()
-      });
-
-    res.status(200).json({
-      success: true,
-      message: "Password changed successfully"
+    
+    // Also create a basic employee record
+    await trx('employees').insert({
+        employee_id: userId,
+        full_name: name,
+        email: email,
+        position: position,
+        department: department,
+        hire_date: new Date(),
+        employment_status: 'permanent',
+        user_id: userId
     });
-  } catch (error) {
-    console.error("Error changing password:", error);
-    res.status(500).json({ error: error.message });
+    
+    delete newUser.password
+    res.status(201).json({ success: true, data: newUser })
+  })
+})
+
+/**
+ * @desc    Update a user
+ * @route   PUT /api/users/:id
+ * @access  Private (update:user)
+ */
+const updateUser = asyncHandler(async (req, res) => {
+  const { id } = req.params
+  const { name, email, role, active, department, position } = req.body
+
+  const updateData = {}
+  if (name) updateData.name = name
+  if (email) updateData.email = email
+  if (role) updateData.role = role
+  if (active !== undefined) updateData.active = active
+  if (department) updateData.department = department
+  if (position) updateData.position = position
+
+  const [updatedUser] = await db("users").where({ id }).update(updateData).returning("*")
+
+  if (!updatedUser) {
+      res.status(404);
+      throw new Error('User not found');
   }
-}
+
+  clearCache(id);
+  delete updatedUser.password
+  res.status(200).json({ success: true, data: updatedUser })
+})
+
+/**
+ * @desc    Delete a user
+ * @route   DELETE /api/users/:id
+ * @access  Private (delete:user)
+ */
+const deleteUser = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  if (id === req.user.id) {
+    res.status(400)
+    throw new Error("You cannot delete your own account.")
+  }
+
+  await db.transaction(async trx => {
+      await trx('user_roles').where({ user_id: id }).del();
+      await trx('employees').where({ user_id: id }).del();
+      // etc for other related tables
+      await trx("users").where({ id }).del();
+  })
+
+  clearCache(id);
+  res.status(200).json({ success: true, message: "User deleted successfully" })
+})
+
+/**
+ * @desc    Update user's own profile
+ * @route   PUT /api/users/:id/profile
+ * @access  Private
+ */
+const updateProfile = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { name, email } = req.body;
+
+    // Users can only update their own profile
+    if (req.user.id !== id) {
+        res.status(403);
+        throw new Error("Forbidden: You can only update your own profile.");
+    }
+    
+    const [updatedUser] = await db('users').where({ id }).update({ name, email }).returning(['id', 'name', 'email']);
+    res.status(200).json({ success: true, data: updatedUser });
+});
+
+/**
+ * @desc    Change user's own password
+ * @route   PUT /api/users/:id/change-password
+ * @access  Private
+ */
+const changePassword = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { oldPassword, newPassword } = req.body;
+
+    if (req.user.id !== id) {
+        res.status(403);
+        throw new Error("Forbidden: You can only change your own password.");
+    }
+
+    const user = await db('users').where({ id }).first();
+    const isMatch = await bcrypt.compare(oldPassword, user.password);
+
+    if (!isMatch) {
+        res.status(400);
+        throw new Error('Incorrect old password');
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    await db('users').where({ id }).update({ password: hashedPassword });
+
+    res.status(200).json({ success: true, message: 'Password changed successfully' });
+});
+
+module.exports = {
+    generateUserId,
+    getAllUsers,
+    getUserById,
+    createUser,
+    updateUser,
+    deleteUser,
+    updateProfile,
+    changePassword,
+};

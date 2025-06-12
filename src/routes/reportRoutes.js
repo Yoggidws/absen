@@ -4,20 +4,48 @@ const {
   generateAttendanceReport,
   generateLeaveReport,
   generatePayrollReport,
+  exportPayrollReport,
   getAllReports,
   getReportById,
   downloadReport,
   deleteReport,
 } = require("../controllers/reportController")
-const { protect, admin } = require("../middlewares/authMiddleware")
+const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
+const { rbac } = require("../middlewares/rbacMiddleware")
 
-// Admin routes
-router.post("/attendance", protect, admin, generateAttendanceReport)
-router.post("/leave", protect, admin, generateLeaveReport)
-router.post("/payroll", protect, admin, generatePayrollReport)
-router.get("/", protect, admin, getAllReports)
-router.get("/:id", protect, admin, getReportById)
-router.get("/:id/download", protect, admin, downloadReport)
-router.delete("/:id", protect, admin, deleteReport)
+// Generate reports (HR/Admin)
+router
+  .route("/attendance")
+  .post(enhancedProtect, rbac.can("generate:report"), generateAttendanceReport)
+
+router
+    .route("/leave")
+    .post(enhancedProtect, rbac.can("generate:report"), generateLeaveReport)
+
+router
+    .route("/payroll")
+    .post(enhancedProtect, rbac.can("generate:report"), generatePayrollReport)
+    
+router
+    .route("/payroll/:periodId")
+    .get(enhancedProtect, rbac.can("generate:report"), exportPayrollReport)
+
+
+// Manage all reports (HR/Admin)
+router
+    .route("/")
+    .get(enhancedProtect, rbac.can("read:report"), getAllReports)
+
+// Manage a specific report (HR/Admin)
+router
+  .route("/:id")
+  .get(enhancedProtect, rbac.can("read:report"), getReportById)
+  .delete(enhancedProtect, rbac.can("delete:report"), deleteReport)
+
+// Download a report file
+router
+    .route("/:id/download")
+    .get(enhancedProtect, rbac.can("read:report"), downloadReport)
+
 
 module.exports = router

@@ -13,6 +13,7 @@
     "docker-build": "docker build -t hris-backend .",
     "docker-run": "docker run -p 5000:5000 --env-file .env hris-backend",
     "assign-managers": "node src/scripts/assignExistingManagers.js",
+    "migrate-roles": "node src/scripts/migrate_existing_roles.js",
     "vercel-build": "npm run migrate"
   },
   "dependencies": {

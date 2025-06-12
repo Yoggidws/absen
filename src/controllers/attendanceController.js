@@ -12,12 +12,8 @@ const activeQRCodes = new Map()
 // @route   GET /api/attendance/qrcode
 // @access  Private/Admin
 exports.generateQRCode = asyncHandler(async (req, res) => {
-  // Only admins can generate QR codes
-  if (req.user.role !== "admin") {
-    res.status(403)
-    throw new Error("Only admins can generate QR codes")
-  }
-
+  // Permission check is handled by route middleware (hasPermission("manage:attendance"))
+  
   // Generate a unique ID for this QR code
   const qrId = "QR-" + Math.random().toString(36).substring(2, 10).toUpperCase()
 
@@ -123,74 +119,91 @@ exports.scanQRCode = asyncHandler(async (req, res) => {
 // @route   GET /api/attendance/history
 // @access  Private
 exports.getAttendanceHistory = asyncHandler(async (req, res) => {
-  const userId = req.params.userId || req.user.id;
+  try {
+    console.log('=== getAttendanceHistory called ===');
+    console.log('req.user:', req.user);
+    console.log('req.params:', req.params);
+    
+    const userId = req.params.userId || req.user.id;
+    console.log('Target userId:', userId);
 
-  // Check if user is requesting their own data or is an admin
-  if (userId !== req.user.id && req.user.role !== "admin") {
-    res.status(403);
-    throw new Error("You can only access your own attendance records");
+    console.log('Permission check passed, proceeding with query...');
+
+    // Query parameters for filtering
+    const { startDate, endDate, type, status } = req.query;
+
+    // Start building query with user join
+    let query = db("attendance as a")
+      .join("users as u", "a.user_id", "=", "u.id")
+      .select(
+        "a.*",
+        "u.name as employee_name",
+        "u.email",
+        "u.department",
+        "u.position"
+      );
+
+    // If admin with read all permission and no specific userId, get all records
+    if (req.originalUrl.includes('/history/all') && req.hasPermission('read:attendance:all')) {
+      console.log('Admin query: getting all records');
+      // No user_id filter for admin viewing all records
+    } else {
+      // For /history/:userId or /history (own)
+      const targetUserId = req.params.userId || req.user.id;
+      console.log('User query: filtering by userId:', targetUserId);
+      // Filter by specific user_id
+      query = query.where("a.user_id", targetUserId);
+    }
+
+    // Order by timestamp
+    query = query.orderBy("a.timestamp", "desc");
+
+    // Apply filters if provided
+    if (startDate) {
+      query = query.where("a.timestamp", ">=", new Date(startDate));
+    }
+
+    if (endDate) {
+      query = query.where("a.timestamp", "<=", new Date(endDate));
+    }
+
+    if (type) {
+      query = query.where("a.type", type);
+    }
+
+    if (status) {
+      query = query.where("a.status", status);
+    }
+
+    console.log('Executing database query...');
+    
+    // Execute query
+    const attendance = await query;
+    
+    console.log('Query result:', attendance.length, 'records found');
+
+    // Process records to include check-in/check-out status
+    const processedAttendance = attendance.map(record => ({
+      ...record,
+      checkIn: record.type === "check-in",
+      checkOut: record.type === "check-out",
+      employeeName: record.employee_name,
+      timestamp: record.timestamp,
+      status: record.status || "recorded"
+    }));
+
+    console.log('Sending response...');
+
+    res.status(200).json({
+      success: true,
+      count: processedAttendance.length,
+      data: processedAttendance,
+    });
+  } catch (error) {
+    console.error('Error in getAttendanceHistory:', error);
+    console.error('Error stack:', error.stack);
+    throw error; // Re-throw to be handled by asyncHandler
   }
-
-  // Query parameters for filtering
-  const { startDate, endDate, type, status } = req.query;
-
-  // Start building query with user join
-  let query = db("attendance as a")
-    .join("users as u", "a.user_id", "=", "u.id")
-    .select(
-      "a.*",
-      "u.name as employee_name",
-      "u.email",
-      "u.department",
-      "u.position"
-    );
-
-  // If admin and no specific userId, get all records
-  if (req.user.role === "admin" && !req.params.userId) {
-    // No user_id filter for admin viewing all records
-  } else {
-    // Filter by specific user_id
-    query = query.where("a.user_id", userId);
-  }
-
-  // Order by timestamp
-  query = query.orderBy("a.timestamp", "desc");
-
-  // Apply filters if provided
-  if (startDate) {
-    query = query.where("a.timestamp", ">=", new Date(startDate));
-  }
-
-  if (endDate) {
-    query = query.where("a.timestamp", "<=", new Date(endDate));
-  }
-
-  if (type) {
-    query = query.where("a.type", type);
-  }
-
-  if (status) {
-    query = query.where("a.status", status);
-  }
-
-  // Execute query
-  const attendance = await query;
-
-  // Process records to include check-in/check-out status
-  const processedAttendance = attendance.map(record => ({
-    ...record,
-    checkIn: record.type === "check-in",
-    checkOut: record.type === "check-out",
-    employeeName: record.employee_name,
-    timestamp: record.timestamp,
-    status: record.status || "recorded"
-  }));
-
-  res.status(200).json({
-    success: true,
-    count: processedAttendance.length,
-    data: processedAttendance,
-  });
 })
 
 // @desc    Get attendance summary for a user
@@ -198,12 +211,6 @@ exports.getAttendanceHistory = asyncHandler(async (req, res) => {
 // @access  Private
 exports.getAttendanceSummary = asyncHandler(async (req, res) => {
   const userId = req.params.userId || req.user.id
-
-  // Check if user is requesting their own data or is an admin
-  if (userId !== req.user.id && req.user.role !== "admin") {
-    res.status(403)
-    throw new Error("You can only access your own attendance records")
-  }
 
   // Query parameters for filtering
   const { month, year } = req.query
@@ -303,11 +310,8 @@ exports.getAttendanceSummary = asyncHandler(async (req, res) => {
 // @route   GET /api/attendance/stats
 // @access  Private/Admin
 exports.getAttendanceStats = asyncHandler(async (req, res) => {
-  // Only admins can access this endpoint
-  if (req.user.role !== "admin") {
-    res.status(403)
-    throw new Error("Only admins can access attendance statistics")
-  }
+  // Permission check is already handled by route middleware (hasPermission("read:attendance:all"))
+  // No need for duplicate check here
 
   const { startDate, endDate, department } = req.query
 
@@ -442,12 +446,34 @@ exports.getAttendanceStats = asyncHandler(async (req, res) => {
   const totalAbsentDays = userStats.reduce((sum, stat) => sum + stat.absentDays, 0)
   const totalLateDays = userStats.reduce((sum, stat) => sum + stat.lateDays, 0)
 
+  // Calculate today's statistics for dashboard
+  const today = new Date().toISOString().split("T")[0]
+  const todayAttendance = attendanceData.filter(record => 
+    new Date(record.timestamp).toISOString().split("T")[0] === today
+  )
+  
+  const presentToday = new Set(
+    todayAttendance
+      .filter(record => record.type === "check-in")
+      .map(record => record.user_id)
+  ).size
+
+  const lateToday = todayAttendance.filter(record => {
+    if (record.type === "check-in") {
+      const checkInTime = new Date(record.timestamp)
+      return checkInTime.getHours() > 9 || (checkInTime.getHours() === 9 && checkInTime.getMinutes() > 15)
+    }
+    return false
+  }).length
+
   const overallStats = {
     totalUsers,
     averageAttendanceRate: Math.round((totalPresentDays / (totalPresentDays + totalAbsentDays)) * 100),
     totalPresentDays,
     totalAbsentDays,
     totalLateDays,
+    presentToday,
+    lateToday,
     departmentStats,
   }
 
@@ -463,6 +489,154 @@ exports.getAttendanceStats = asyncHandler(async (req, res) => {
       },
     },
   })
+})
+
+// @desc    Get dashboard statistics
+// @route   GET /api/attendance/dashboard-stats
+// @access  Private
+exports.getDashboardStats = asyncHandler(async (req, res) => {
+  const userId = req.user.id
+
+  // Use the new rbac helpers if they exist, otherwise fallback to old structure
+  const canReadAll = req.hasPermission('read:attendance:all') || req.hasRole('admin');
+
+  const today = new Date()
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59)
+
+  let stats = {
+    totalEmployees: 0,
+    presentToday: 0,
+    onLeave: 0,
+    lateToday: 0,
+    attendanceRate: '0%',
+    pendingApprovals: 0
+  }
+
+  try {
+    if (canReadAll) {
+      // Admin/HR users get organization-wide stats
+      
+      // Get total active employees
+      const totalEmployeesResult = await db("users")
+        .where({ active: true })
+        .count("id as count")
+        .first()
+      
+      stats.totalEmployees = parseInt(totalEmployeesResult.count) || 0
+
+      // Get today's attendance
+      const todayAttendance = await db("attendance")
+        .whereBetween("timestamp", [startOfToday, endOfToday])
+        .select("user_id", "type", "timestamp")
+
+      // Calculate present today (users who checked in)
+      const checkedInUsers = new Set(
+        todayAttendance
+          .filter(record => record.type === "check-in")
+          .map(record => record.user_id)
+      )
+      stats.presentToday = checkedInUsers.size
+
+      // Calculate late arrivals (check-in after 9:15 AM)
+      stats.lateToday = todayAttendance.filter(record => {
+        if (record.type === "check-in") {
+          const checkInTime = new Date(record.timestamp)
+          return checkInTime.getHours() > 9 || 
+                 (checkInTime.getHours() === 9 && checkInTime.getMinutes() > 15)
+        }
+        return false
+      }).length
+
+      // Calculate attendance rate for current month
+      const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1)
+      const workingDaysThisMonth = getWorkingDaysInPeriod(startOfMonth, today)
+      
+      if (workingDaysThisMonth > 0) {
+        const monthlyAttendance = await db("attendance")
+          .whereBetween("timestamp", [startOfMonth, endOfToday])
+          .where("type", "check-in")
+          .distinct("user_id")
+          .count("user_id as count")
+          .first()
+        
+        const attendanceCount = parseInt(monthlyAttendance.count) || 0
+        const expectedAttendance = stats.totalEmployees * workingDaysThisMonth
+        stats.attendanceRate = expectedAttendance > 0 
+          ? `${Math.round((attendanceCount / expectedAttendance) * 100)}%` 
+          : '0%'
+      }
+
+    } else {
+      // Regular employees get their own stats
+      stats.totalEmployees = 1 // Just themselves
+      
+      // Check if user is present today
+      const userTodayAttendance = await db("attendance")
+        .where({ user_id: userId })
+        .whereBetween("timestamp", [startOfToday, endOfToday])
+        .orderBy("timestamp", "desc")
+      
+      stats.presentToday = userTodayAttendance.some(record => record.type === "check-in") ? 1 : 0
+      
+      // Check if user was late today
+      const userCheckIn = userTodayAttendance.find(record => record.type === "check-in")
+      if (userCheckIn) {
+        const checkInTime = new Date(userCheckIn.timestamp)
+        stats.lateToday = (checkInTime.getHours() > 9 || 
+                          (checkInTime.getHours() === 9 && checkInTime.getMinutes() > 15)) ? 1 : 0
+      }
+
+      // Calculate user's monthly attendance rate
+      const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1)
+      const workingDaysThisMonth = getWorkingDaysInPeriod(startOfMonth, today)
+      
+      const userMonthlyAttendance = await db("attendance")
+        .where({ user_id: userId })
+        .whereBetween("timestamp", [startOfMonth, endOfToday])
+        .where("type", "check-in")
+        .distinct("user_id")
+        .count("user_id as count")
+        .first()
+      
+      const userAttendanceCount = parseInt(userMonthlyAttendance.count) || 0
+      stats.attendanceRate = workingDaysThisMonth > 0 
+        ? `${Math.round((userAttendanceCount / workingDaysThisMonth) * 100)}%` 
+        : '0%'
+    }
+
+    // Get current leave requests (people currently on leave)
+    const currentLeaveRequests = await db("leave_requests")
+      .where("status", "approved")
+      .where("start_date", "<=", today)
+      .where("end_date", ">=", today)
+      .count("id as count")
+      .first()
+    
+    stats.onLeave = parseInt(currentLeaveRequests.count) || 0
+
+    // Get pending leave approvals
+    if (canReadAll || req.hasRole('manager') || req.hasPermission('approve:leave')) {
+      const pendingLeaveRequests = await db("leave_requests")
+        .where("status", "pending")
+        .count("id as count")
+        .first()
+      
+      stats.pendingApprovals = parseInt(pendingLeaveRequests.count) || 0
+    }
+
+    res.status(200).json({
+      success: true,
+      data: stats
+    })
+
+  } catch (error) {
+    console.error("Error fetching dashboard stats:", error)
+    res.status(200).json({
+      success: true,
+      data: stats // Return default stats even if there's an error
+    })
+  }
 })
 
 // Helper function to clean up expired QR codes

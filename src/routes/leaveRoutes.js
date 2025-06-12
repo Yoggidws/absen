@@ -2,35 +2,59 @@ const express = require("express")
 const router = express.Router()
 const {
   createLeaveRequest,
-  getLeaveRequests,
+  getAllLeaveRequests,
   getLeaveRequestById,
-  updateLeaveRequestStatus,
+  updateLeaveRequest,
   cancelLeaveRequest,
-  getPendingApprovals,
-  getLeaveStatistics,
   getLeaveBalance,
-  getDepartmentOverview,
-  getLeaveApprovalWorkflow,
-  getAllLeaveBalances,
-  adjustLeaveBalance
+  getLeaveStats,
+  getDepartmentLeave,
+  getPendingApprovals,
+  bulkUpdateLeaveStatus,
 } = require("../controllers/leaveController")
-const { protect, admin } = require("../middlewares/authMiddleware")
+const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
+const { rbac } = require("../middlewares/rbacMiddleware")
 
-// Protected routes
-router.post("/", protect, createLeaveRequest)
-router.get("/", protect, getLeaveRequests)
-router.get("/pending-approval", protect, getPendingApprovals)
-router.get("/stats", protect, admin, getLeaveStatistics)
-router.get("/balance", protect, getLeaveBalance)
-router.get("/department-overview", protect, getDepartmentOverview)
-// These routes with parameters must come after the specific routes
-router.get("/:id", protect, getLeaveRequestById)
-router.get("/:id/workflow", protect, getLeaveApprovalWorkflow)
-router.put("/:id", protect, updateLeaveRequestStatus)
-router.put("/:id/cancel", protect, cancelLeaveRequest)
+// Get all leave requests (for HR/Admins) or own requests
+router
+  .route("/")
+  .get(enhancedProtect, getAllLeaveRequests) // Controller handles own vs all logic based on permissions
+  .post(enhancedProtect, rbac.can("create:leave_request"), createLeaveRequest)
 
-// Admin routes
-router.get("/balances/all", protect, admin, getAllLeaveBalances)
-router.post("/balance/adjust", protect, admin, adjustLeaveBalance)
+// Get leave balance for the current user
+router
+    .route("/balance")
+    .get(enhancedProtect, rbac.can("read:leave_request:own"), getLeaveBalance)
+
+// Get leave statistics (for HR/Admins)
+router
+    .route("/stats")
+    .get(enhancedProtect, rbac.can("read:leave_request:all"), getLeaveStats)
+
+// Get leave requests for a specific department (for Managers/HR/Admins)
+router
+  .route("/department")
+  .get(enhancedProtect, rbac.role(["Manager", "HR", "Admin"]), getDepartmentLeave)
+
+// Get pending approvals for the current user (Manager/HR/Admin)
+router
+  .route("/pending-approvals")
+  .get(enhancedProtect, rbac.can("approve:leave_request"), getPendingApprovals)
+  
+// Bulk update status (for Managers/HR/Admins)
+router
+    .route("/bulk-update")
+    .post(enhancedProtect, rbac.can("approve:leave_request"), bulkUpdateLeaveStatus)
+
+// Manage a specific leave request
+router
+  .route("/:id")
+  .get(enhancedProtect, getLeaveRequestById) // Controller handles ownership/permission check
+  .put(enhancedProtect, rbac.can("approve:leave_request"), updateLeaveRequest)
+
+// Cancel a specific leave request
+router
+    .route("/:id/cancel")
+    .put(enhancedProtect, rbac.can("cancel:leave_request"), cancelLeaveRequest)
 
 module.exports = router

@@ -8,16 +8,25 @@ const {
   deleteDepartment,
   getDepartmentStats,
 } = require("../controllers/departmentController")
-const { protect, admin } = require("../middlewares/authMiddleware")
+const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
+const { rbac } = require("../middlewares/rbacMiddleware")
 
-// Protected routes
-router.get("/", protect, getAllDepartments)
-router.get("/stats", protect, admin, getDepartmentStats)
-router.get("/:id", protect, getDepartmentById)
+// Routes for creating and viewing departments
+router
+  .route("/")
+  .post(enhancedProtect, rbac.can("create:department"), createDepartment)
+  .get(enhancedProtect, rbac.can("read:department"), getAllDepartments)
 
-// Admin routes
-router.post("/", protect, admin, createDepartment)
-router.put("/:id", protect, admin, updateDepartment)
-router.delete("/:id", protect, admin, deleteDepartment)
+// Route for department statistics
+router
+    .route("/stats")
+    .get(enhancedProtect, rbac.can("read:department"), getDepartmentStats)
+
+// Routes for specific departments
+router
+  .route("/:id")
+  .get(enhancedProtect, rbac.can("read:department"), getDepartmentById)
+  .put(enhancedProtect, rbac.can("update:department"), updateDepartment)
+  .delete(enhancedProtect, rbac.can("delete:department"), deleteDepartment)
 
 module.exports = router

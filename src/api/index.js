@@ -5,13 +5,12 @@ const dotenv = require("dotenv")
 const helmet = require("helmet")
 const rateLimit = require("express-rate-limit")
 const { errorHandler } = require("../middlewares/errorMiddleware")
-const vercelCorsMiddleware = require("../middlewares/vercelCorsMiddleware")
 const { testConnection, getPoolStatus, destroyConnectionPool } = require("../config/db")
 
 // Load environment variables
 dotenv.config()
 
-const port = 5000 // Explicitly use port 5002
+const port = process.env.PORT || 5000;
 console.log(`Using port: ${port}`)
 // const serverless = require("serverless-http");
 
@@ -28,34 +27,42 @@ const apiLimiter = rateLimit({
 // Create Express app
 const app = express()
 
+// --- Centralized CORS Configuration ---
+const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Allow all origins in development
+    if (process.env.NODE_ENV === 'development') {
+        return callback(null, true);
+    }
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+      callback(null, true)
+    } else {
+      callback(new Error('Not allowed by CORS'))
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  optionsSuccessStatus: 200 // For legacy browser support
+}
+
+// Enable pre-flight across-the-board
+app.options('*', cors(corsOptions))
+
+// Apply main CORS middleware
+app.use(cors(corsOptions));
+// --- End of CORS Configuration ---
+
+
 // Apply security middleware
 app.use(helmet()) // Add security headers
 app.use("/api", apiLimiter) // Apply rate limiting to API routes
-
-// Apply our enhanced CORS middleware for all environments
-console.log('Using enhanced CORS middleware');
-app.use(vercelCorsMiddleware);
-
-// Fallback CORS configuration using the cors package
-// This is a secondary layer of protection in case our middleware fails
-app.use(
-  cors({
-    origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "access-control-allow-methods", "Access-Control-Allow-Methods", "*"],
-    credentials: true,
-    preflightContinue: false,
-    optionsSuccessStatus: 204
-  }),
-)
-
-// Add OPTIONS handling for preflight requests
-app.options('*', cors({
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "access-control-allow-methods", "Access-Control-Allow-Methods", "*"],
-  credentials: true
-}))
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason)
@@ -80,6 +87,9 @@ app.use("/api/compensation", require("../routes/compensationRoutes"))
 app.use("/api/payroll", require("../routes/payrollRoutes"))
 app.use("/api/reports", require("../routes/reportRoutes"))
 app.use("/api/employees", require("../routes/employeeRoutes"))
+app.use("/api/announcements", require("../routes/announcementRoutes"))
+app.use("/api/roles", require("../routes/roleRoutes"))
+app.use("/api/permissions", require("../routes/permissionRoutes"))
 
 app.get("/test", (_req, res) => {
   res.status(200).json({ status: "ok", message: "Test endpoint working" })
@@ -155,40 +165,9 @@ app.post("/reset-pool", async (_req, res) => {
 
 app.use(errorHandler)
 
-// Handle serverless deployment (Vercel)
+// The serverless handler no longer needs its own CORS logic.
+// The main `app.use(cors(corsOptions))` will handle it.
 const handleServerless = (req, res) => {
-  // Handle OPTIONS requests for CORS preflight
-  if (req.method === "OPTIONS") {
-    // Get allowed origins from environment variable or use wildcard
-    const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['*'];
-
-    // Get the origin of the request
-    const origin = req.headers.origin;
-
-    // Set CORS headers - check if origin is allowed or if we're using wildcard
-    if (allowedOrigins.includes('*') || (origin && allowedOrigins.includes(origin))) {
-      res.setHeader('Access-Control-Allow-Origin', origin || '*');
-    } else if (origin) {
-      // If we have an origin but it's not in our allowed list, still allow it in development
-      if (process.env.NODE_ENV === 'development') {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-      } else {
-        res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0] || '*');
-      }
-    } else {
-      // No origin header, use wildcard
-      res.setHeader('Access-Control-Allow-Origin', '*');
-    }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept, Authorization, access-control-allow-methods, Access-Control-Allow-Methods, *');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Expose-Headers', '*');
-    res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
-    res.status(200).end();
-    return;
-  }
-
-  // Forward the request to the Express app
   return app(req, res);
 };
 
@@ -201,6 +180,10 @@ if (process.env.NODE_ENV !== 'production' || process.env.DEPLOY_TARGET !== 'verc
     console.log(`Server ${process.env.NODE_ENV} running on port ${port}`)
     console.log(`Local: http://localhost:${port}`)
     console.log(`Network: http://0.0.0.0:${port}`)
-    console.log(`CORS is configured to allow all origins`)
+    if (process.env.NODE_ENV === 'development') {
+        console.log(`CORS is configured to allow all origins in development mode.`)
+    } else {
+        console.log(`CORS is configured to allow origins: ${process.env.ALLOWED_ORIGINS}`)
+    }
   })
 }

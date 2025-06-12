@@ -1,126 +1,99 @@
-const AWS = require('aws-sdk');
-const fs = require('fs');
-const path = require('path');
+const fs = require("fs")
+const path = require("path")
+const { promisify } = require("util")
+
+const mkdirAsync = promisify(fs.mkdir)
+const unlinkAsync = promisify(fs.unlink)
+
+const UPLOADS_DIR = path.join(__dirname, "../../uploads")
 
 class StorageService {
   constructor() {
-    this.storageType = process.env.STORAGE_TYPE || 'local';
-    
-    if (this.storageType === 's3') {
-      this.s3 = new AWS.S3({
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-        region: process.env.S3_REGION
-      });
-      this.bucket = process.env.S3_BUCKET;
+    this.storageType = process.env.STORAGE_TYPE || "local"
+    if (this.storageType === "local" && !fs.existsSync(UPLOADS_DIR)) {
+      fs.mkdirSync(UPLOADS_DIR, { recursive: true })
     }
   }
 
+  /**
+   * Uploads a file to the configured storage provider.
+   * @param {object} file - The file object from multer.
+   * @param {string} directory - The subdirectory to upload to (e.g., 'documents', 'avatars').
+   * @returns {Promise<{file_key: string, file_location: string}>} - The key and location of the uploaded file.
+   */
   async uploadFile(file, directory) {
-    if (this.storageType === 's3') {
-      return this.uploadToS3(file, directory);
-    }
-    return this.uploadToLocal(file, directory);
+    return this.uploadToLocal(file, directory)
   }
 
-  async uploadToS3(file, directory) {
-    const key = `${directory}/${Date.now()}-${file.originalname}`;
-    
-    const params = {
-      Bucket: this.bucket,
-      Key: key,
-      Body: file.buffer,
-      ContentType: file.mimetype,
-      ACL: 'private'
-    };
-
-    try {
-      const result = await this.s3.upload(params).promise();
-      return {
-        url: result.Location,
-        key: result.Key
-      };
-    } catch (error) {
-      console.error('S3 upload error:', error);
-      throw new Error('Failed to upload file to S3');
-    }
-  }
-
+  /**
+   * Uploads a file to the local filesystem.
+   * @param {object} file - The file object from multer.
+   * @param {string} directory - The subdirectory.
+   * @returns {Promise<{file_key: string, file_location: string}>}
+   */
   async uploadToLocal(file, directory) {
-    const uploadDir = path.join(__dirname, '../../uploads', directory);
-    
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
+    const dirPath = path.join(UPLOADS_DIR, directory)
+    await mkdirAsync(dirPath, { recursive: true })
 
-    const filename = `${Date.now()}-${file.originalname}`;
-    const filepath = path.join(uploadDir, filename);
+    const fileExtension = path.extname(file.originalname)
+    const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}${fileExtension}`
+    const filePath = path.join(dirPath, fileName)
 
-    try {
-      await fs.promises.writeFile(filepath, file.buffer);
-      return {
-        url: `/uploads/${directory}/${filename}`,
-        key: `${directory}/${filename}`
-      };
-    } catch (error) {
-      console.error('Local upload error:', error);
-      throw new Error('Failed to upload file locally');
+    fs.writeFileSync(filePath, file.buffer)
+
+    const fileKey = path.join(directory, fileName)
+    return {
+      file_key: fileKey,
+      file_location: `/uploads/${fileKey.replace(/\\/g, "/")}`, // URL-friendly path
     }
   }
 
+  /**
+   * Deletes a file from the configured storage.
+   * @param {string} key - The key of the file to delete.
+   * @returns {Promise<void>}
+   */
   async deleteFile(key) {
-    if (this.storageType === 's3') {
-      return this.deleteFromS3(key);
-    }
-    return this.deleteFromLocal(key);
+    return this.deleteFromLocal(key)
   }
 
-  async deleteFromS3(key) {
-    const params = {
-      Bucket: this.bucket,
-      Key: key
-    };
-
-    try {
-      await this.s3.deleteObject(params).promise();
-      return true;
-    } catch (error) {
-      console.error('S3 delete error:', error);
-      throw new Error('Failed to delete file from S3');
-    }
-  }
-
+  /**
+   * Deletes a file from the local filesystem.
+   * @param {string} key - The key of the file to delete.
+   * @returns {Promise<void>}
+   */
   async deleteFromLocal(key) {
-    const filepath = path.join(__dirname, '../../uploads', key);
-    
     try {
-      await fs.promises.unlink(filepath);
-      return true;
+      if (!key) {
+        console.warn("deleteFromLocal called with null or undefined key.");
+        return;
+      }
+      const filePath = path.join(UPLOADS_DIR, key)
+      if (fs.existsSync(filePath)) {
+        await unlinkAsync(filePath)
+        console.log(`Local file deleted: ${filePath}`)
+      } else {
+        console.warn(`Local file not found for deletion: ${filePath}`)
+      }
     } catch (error) {
-      console.error('Local delete error:', error);
-      throw new Error('Failed to delete file locally');
+      console.error(`Error deleting local file ${key}:`, error)
+      throw new Error("Could not delete file from local storage.")
     }
   }
 
+  /**
+   * Gets a temporary signed URL for a file.
+   * For local storage, this can just return the static path.
+   * @param {string} key - The key of the file.
+   * @param {number} expiresIn - The expiration time in seconds (ignored for local).
+   * @returns {Promise<string>} - The accessible URL for the file.
+   */
   async getSignedUrl(key, expiresIn = 3600) {
-    if (this.storageType !== 's3') {
-      return `/uploads/${key}`;
-    }
-
-    const params = {
-      Bucket: this.bucket,
-      Key: key,
-      Expires: expiresIn
-    };
-
-    try {
-      return await this.s3.getSignedUrlPromise('getObject', params);
-    } catch (error) {
-      console.error('S3 signed URL error:', error);
-      throw new Error('Failed to generate signed URL');
-    }
+    // For local storage, we just return the direct path.
+    // In a real production scenario with protected static files, this would need a mechanism
+    // to serve the file only to authorized users, perhaps via a dedicated route.
+    return `/uploads/${key.replace(/\\/g, "/")}`
   }
 }
 
-module.exports = new StorageService(); 
+module.exports = new StorageService()

@@ -7,6 +7,34 @@ const path = require("path")
 const { format } = require("date-fns")
 
 /**
+ * Safely convert a value to a number, returning 0 for invalid values
+ * @param {any} value - Value to convert
+ * @returns {number} - Valid number or 0
+ */
+function safeNumber(value) {
+  if (value === null || value === undefined || value === '') {
+    return 0;
+  }
+  
+  const num = Number.parseFloat(value);
+  return isNaN(num) ? 0 : num;
+}
+
+/**
+ * Safely convert a value to an integer, returning 0 for invalid values
+ * @param {any} value - Value to convert
+ * @returns {number} - Valid integer or 0
+ */
+function safeInteger(value) {
+  if (value === null || value === undefined || value === '') {
+    return 0;
+  }
+  
+  const num = Number.parseInt(value, 10);
+  return isNaN(num) ? 0 : num;
+}
+
+/**
  * @desc    Generate attendance report
  * @route   POST /api/reports/attendance
  * @access  Private/Admin
@@ -132,17 +160,47 @@ exports.generateAttendanceReport = asyncHandler(async (req, res) => {
     file_url: filePath,
   })
 
-  // Set response headers for file download
-  res.setHeader("Content-Disposition", `attachment; filename="attendance-report.${format.toLowerCase()}"`)
+  // Verify file exists and has content before streaming
+  console.log('🔍 DEBUG: PRE-STREAM CHECK: Attempting to stream file from filePath:', filePath);
+  if (!fs.existsSync(filePath)) {
+    res.status(500)
+    throw new Error("Generated file not found")
+  }
 
-  if (format.toLowerCase() === "pdf") {
+  const stats = fs.statSync(filePath)
+  if (stats.size === 0) {
+    res.status(500)
+    throw new Error("Generated file is empty")
+  }
+
+  console.log('🔍 DEBUG: File verified, size:', stats.size, 'bytes')
+
+  // Set response headers for file download
+  const filename = `attendance-report-${Date.now()}.${format === "excel" ? "xlsx" : format}`
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`)
+  res.setHeader("Content-Length", stats.size)
+
+  console.log('🔍 DEBUG: Setting content type for format:', format)
+  if (format === "pdf") {
     res.setHeader("Content-Type", "application/pdf")
-  } else {
+  } else if (format === "excel") {
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
   }
 
-  // Stream file to response
+  // Stream file to response with proper error handling
   const fileStream = fs.createReadStream(filePath)
+  
+  fileStream.on('error', (error) => {
+    console.error('🔍 DEBUG: File stream error:', error.message)
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: 'Error reading file' })
+    }
+  })
+
+  fileStream.on('end', () => {
+    console.log('🔍 DEBUG: File stream completed successfully')
+  })
+
   fileStream.pipe(res)
 })
 
@@ -257,17 +315,47 @@ exports.generateLeaveReport = asyncHandler(async (req, res) => {
     file_url: filePath,
   })
 
-  // Set response headers for file download
-  res.setHeader("Content-Disposition", `attachment; filename="leave-report.${format.toLowerCase()}"`)
+  // Verify file exists and has content before streaming
+  console.log('🔍 DEBUG: PRE-STREAM CHECK: Attempting to stream file from filePath:', filePath);
+  if (!fs.existsSync(filePath)) {
+    res.status(500)
+    throw new Error("Generated file not found")
+  }
 
-  if (format.toLowerCase() === "pdf") {
+  const stats = fs.statSync(filePath)
+  if (stats.size === 0) {
+    res.status(500)
+    throw new Error("Generated file is empty")
+  }
+
+  console.log('🔍 DEBUG: File verified, size:', stats.size, 'bytes')
+
+  // Set response headers for file download
+  const filename = `leave-report-${Date.now()}.${format === "excel" ? "xlsx" : format}`
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`)
+  res.setHeader("Content-Length", stats.size)
+
+  console.log('🔍 DEBUG: Setting content type for format:', format)
+  if (format === "pdf") {
     res.setHeader("Content-Type", "application/pdf")
-  } else {
+  } else if (format === "excel") {
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
   }
 
-  // Stream file to response
+  // Stream file to response with proper error handling
   const fileStream = fs.createReadStream(filePath)
+  
+  fileStream.on('error', (error) => {
+    console.error('🔍 DEBUG: File stream error:', error.message)
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: 'Error reading file' })
+    }
+  })
+
+  fileStream.on('end', () => {
+    console.log('🔍 DEBUG: File stream completed successfully')
+  })
+
   fileStream.pipe(res)
 })
 
@@ -277,11 +365,64 @@ exports.generateLeaveReport = asyncHandler(async (req, res) => {
  * @access  Private/Admin
  */
 exports.generatePayrollReport = asyncHandler(async (req, res) => {
-  const { periodId, department, format = "pdf" } = req.body
+  const { periodId, department } = req.body
+  // Accept format from body or query string
+  let format = req.body.format || req.query.format || "pdf"
+  if (typeof format !== 'string') {
+    format = "pdf"
+  }
+  format = format.toLowerCase()
 
   if (!periodId) {
     res.status(400)
     throw new Error("Payroll period ID is required")
+  }
+
+  await generatePayrollReportFile(req, res, periodId, department, format)
+})
+
+/**
+ * @desc    Export payroll report by period ID
+ * @route   GET /api/reports/payroll/:periodId
+ * @access  Private/Admin
+ */
+exports.exportPayrollReport = asyncHandler(async (req, res) => {
+  const { periodId } = req.params
+  const { department } = req.query
+  
+  // Ensure format is properly handled with fallback
+  let format = req.query.format || "pdf"
+  if (typeof format !== 'string') {
+    format = "pdf"
+  }
+  format = format.toLowerCase()
+
+  if (!periodId) {
+    res.status(400)
+    throw new Error("Payroll period ID is required")
+  }
+
+  await generatePayrollReportFile(req, res, periodId, department, format)
+})
+
+/**
+ * @desc    Generate payroll report file (shared logic)
+ * @access  Private
+ */
+const generatePayrollReportFile = asyncHandler(async (req, res, periodId, department, format) => {
+  // Ensure format is valid
+  if (!format || typeof format !== 'string') {
+    format = 'pdf'
+  }
+  format = format.toLowerCase()
+  
+  // Add debugging
+  console.log('🔍 DEBUG: generatePayrollReportFile called with format:', format)
+  
+  // Validate format
+  if (format !== 'pdf' && format !== 'excel') {
+    res.status(400)
+    throw new Error("Invalid format. Supported formats: pdf, excel")
   }
 
   // Get payroll period
@@ -290,6 +431,8 @@ exports.generatePayrollReport = asyncHandler(async (req, res) => {
     res.status(404)
     throw new Error("Payroll period not found")
   }
+
+  console.log('🔍 DEBUG: Payroll period found:', payrollPeriod.name)
 
   // Get payroll items
   let payrollQuery = db("payroll_items as pi")
@@ -328,14 +471,16 @@ exports.generatePayrollReport = asyncHandler(async (req, res) => {
 
   const payrollItems = await payrollQuery
 
+  console.log('🔍 DEBUG: Payroll items found:', payrollItems.length)
+
   // Calculate totals
   const totals = payrollItems.reduce(
     (acc, item) => {
-      acc.totalGrossSalary += Number.parseFloat(item.gross_salary) || 0
-      acc.totalNetSalary += Number.parseFloat(item.net_salary) || 0
-      acc.totalBonuses += Number.parseFloat(item.bonuses) || 0
-      acc.totalDeductions += Number.parseFloat(item.deductions) || 0
-      acc.totalAbsenceDeduction += Number.parseFloat(item.absence_deduction) || 0
+      acc.totalGrossSalary += safeNumber(item.gross_salary)
+      acc.totalNetSalary += safeNumber(item.net_salary)
+      acc.totalBonuses += safeNumber(item.bonuses)
+      acc.totalDeductions += safeNumber(item.deductions)
+      acc.totalAbsenceDeduction += safeNumber(item.absence_deduction)
       return acc
     },
     {
@@ -347,12 +492,16 @@ exports.generatePayrollReport = asyncHandler(async (req, res) => {
     },
   )
 
+  // Generate a unique ID for the report
+  const reportId = "RPT-" + Math.random().toString(36).substring(2, 10).toUpperCase()
+
   // Create report record
   const [report] = await db("reports")
     .insert({
+      id: reportId,
       name: `Payroll Report - ${payrollPeriod.name}`,
-      type: "payroll",
-      format: format.toLowerCase(),
+      type: "custom",
+      format: format,
       date_range: JSON.stringify({
         startDate: payrollPeriod.start_date,
         endDate: payrollPeriod.end_date,
@@ -362,15 +511,34 @@ exports.generatePayrollReport = asyncHandler(async (req, res) => {
     })
     .returning("*")
 
+  console.log('🔍 DEBUG: Report record created with format:', report.format)
+
   // Generate report file
   let filePath
-  if (format.toLowerCase() === "pdf") {
-    filePath = await generatePayrollPDF(payrollItems, totals, payrollPeriod, department)
-  } else if (format.toLowerCase() === "excel") {
-    filePath = await generatePayrollExcel(payrollItems, totals, payrollPeriod, department)
-  } else {
-    res.status(400)
-    throw new Error("Invalid format. Supported formats: pdf, excel")
+  console.log('🔍 DEBUG: About to generate file, format check:', format)
+  
+  try {
+    if (format === "pdf") {
+      console.log('🔍 DEBUG: Generating PDF file')
+      filePath = await generatePayrollPDF(payrollItems, totals, payrollPeriod, department)
+    } else if (format === "excel") {
+      console.log('🔍 DEBUG: Generating Excel file')
+      filePath = await generatePayrollExcel(payrollItems, totals, payrollPeriod, department)
+    } else {
+      throw new Error(`Unsupported format: ${format}`)
+    }
+    
+    if (!filePath) {
+      throw new Error(`Failed to generate ${format} file - no file path returned`)
+    }
+    
+    console.log('🔍 DEBUG: File generated successfully at:', filePath)
+    
+  } catch (error) {
+    console.error('🔍 DEBUG: Error generating file:', error.message)
+    console.error('🔍 DEBUG: Error stack:', error.stack)
+    res.status(500)
+    throw new Error(`Failed to generate ${format} report: ${error.message}`)
   }
 
   // Update report with file URL
@@ -378,20 +546,53 @@ exports.generatePayrollReport = asyncHandler(async (req, res) => {
     file_url: filePath,
   })
 
-  // Set response headers for file download
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename="payroll-report-${payrollPeriod.name.replace(/\s+/g, "-")}.${format.toLowerCase()}"`,
-  )
-
-  if (format.toLowerCase() === "pdf") {
-    res.setHeader("Content-Type", "application/pdf")
-  } else {
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+  // Verify file exists and has content before streaming
+  console.log('🔍 DEBUG: PRE-STREAM CHECK: Attempting to stream file from filePath:', filePath);
+  if (!fs.existsSync(filePath)) {
+    res.status(500)
+    throw new Error("Generated file not found")
   }
 
-  // Stream file to response
+  const stats = fs.statSync(filePath)
+  if (stats.size === 0) {
+    res.status(500)
+    throw new Error("Generated file is empty")
+  }
+
+  console.log('🔍 DEBUG: File verified, size:', stats.size, 'bytes')
+
+  // Set response headers for file download
+  const filename = `payroll-report-${payrollPeriod.name.replace(/\s+/g, "-")}.${format === "excel" ? "xlsx" : format}`
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`)
+  res.setHeader("Content-Length", stats.size)
+
+  console.log('🔍 DEBUG: PRE-CHECK: format is:', format);
+  if (format === "pdf") {
+    console.log('🔍 DEBUG: Setting Content-Type to application/pdf');
+    res.setHeader("Content-Type", "application/pdf");
+    console.log('🔍 DEBUG: POST-CHECK: Content-Type for PDF set.');
+  } else if (format === "excel") {
+    console.log('🔍 DEBUG: Setting Content-Type to application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    console.log('🔍 DEBUG: POST-CHECK: Content-Type for Excel set.');
+  } else {
+    console.log('🔍 DEBUG: WARNING - format is neither pdf nor excel. Format:', format);
+  }
+
+  // Stream file to response with proper error handling
   const fileStream = fs.createReadStream(filePath)
+  
+  fileStream.on('error', (error) => {
+    console.error('🔍 DEBUG: File stream error:', error.message)
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: 'Error reading file' })
+    }
+  })
+
+  fileStream.on('end', () => {
+    console.log('🔍 DEBUG: File stream completed successfully')
+  })
+
   fileStream.pipe(res)
 })
 
@@ -518,8 +719,17 @@ exports.downloadReport = asyncHandler(async (req, res) => {
     throw new Error("Report file not found")
   }
 
+  // Verify file has content
+  const stats = fs.statSync(report.file_url)
+  if (stats.size === 0) {
+    res.status(404)
+    throw new Error("Report file is empty")
+  }
+
   // Set response headers
-  res.setHeader("Content-Disposition", `attachment; filename="${path.basename(report.file_url)}"`)
+  const filename = path.basename(report.file_url)
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`)
+  res.setHeader("Content-Length", stats.size)
 
   if (report.format === "pdf") {
     res.setHeader("Content-Type", "application/pdf")
@@ -529,8 +739,20 @@ exports.downloadReport = asyncHandler(async (req, res) => {
     res.setHeader("Content-Type", "application/octet-stream")
   }
 
-  // Stream file to response
+  // Stream file to response with proper error handling
   const fileStream = fs.createReadStream(report.file_url)
+  
+  fileStream.on('error', (error) => {
+    console.error('Download file stream error:', error.message)
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: 'Error reading file' })
+    }
+  })
+
+  fileStream.on('end', () => {
+    console.log('Download file stream completed successfully')
+  })
+
   fileStream.pipe(res)
 })
 
@@ -1214,75 +1436,67 @@ async function generatePayrollPDF(payrollItems, totals, payrollPeriod, departmen
  */
 async function generatePayrollExcel(payrollItems, totals, payrollPeriod, department) {
   // Create directory if it doesn't exist
-  const uploadsDir = path.join(__dirname, "../../uploads/reports")
+  const uploadsDir = path.join(__dirname, "../../uploads/reports");
   if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true })
+    fs.mkdirSync(uploadsDir, { recursive: true });
   }
 
-  // Create Excel workbook
-  const filePath = path.join(uploadsDir, `payroll-report-${payrollPeriod.name.replace(/\s+/g, "-")}-${Date.now()}.xlsx`)
-  const workbook = new ExcelJS.Workbook()
+  const filePath = path.join(uploadsDir, `payroll-report-${payrollPeriod.name.replace(/\s+/g, "-")}-${Date.now()}.xlsx`);
+  const workbook = new ExcelJS.Workbook();
 
-  // Add metadata
-  workbook.creator = "HR System"
-  workbook.created = new Date()
-  workbook.modified = new Date()
+  workbook.creator = "HR System";
+  workbook.created = new Date();
+  workbook.modified = new Date();
 
-  // Create summary worksheet
-  const summarySheet = workbook.addWorksheet("Summary")
+  const summarySheet = workbook.addWorksheet("Summary");
 
-  // Add title
-  summarySheet.mergeCells("A1:E1")
-  summarySheet.getCell("A1").value = "Payroll Report"
-  summarySheet.getCell("A1").font = { size: 16, bold: true }
-  summarySheet.getCell("A1").alignment = { horizontal: "center" }
+  summarySheet.mergeCells("A1:E1");
+  summarySheet.getCell("A1").value = "Payroll Report";
+  summarySheet.getCell("A1").font = { size: 16, bold: true };
+  summarySheet.getCell("A1").alignment = { horizontal: "center" };
 
-  // Add report period
-  summarySheet.mergeCells("A2:E2")
-  summarySheet.getCell("A2").value = `Period: ${payrollPeriod.name}`
-  summarySheet.getCell("A2").alignment = { horizontal: "center" }
+  summarySheet.mergeCells("A2:E2");
+  summarySheet.getCell("A2").value = `Period: ${payrollPeriod.name}`;
+  summarySheet.getCell("A2").alignment = { horizontal: "center" };
 
-  summarySheet.mergeCells("A3:E3")
-  summarySheet.getCell("A3").value = `Status: ${payrollPeriod.status}`
-  summarySheet.getCell("A3").alignment = { horizontal: "center" }
+  summarySheet.mergeCells("A3:E3");
+  summarySheet.getCell("A3").value = `Status: ${payrollPeriod.status}`;
+  summarySheet.getCell("A3").alignment = { horizontal: "center" };
 
   if (department) {
-    summarySheet.mergeCells("A4:E4")
-    summarySheet.getCell("A4").value = `Department: ${department}`
-    summarySheet.getCell("A4").alignment = { horizontal: "center" }
+    summarySheet.mergeCells("A4:E4");
+    summarySheet.getCell("A4").value = `Department: ${department}`;
+    summarySheet.getCell("A4").alignment = { horizontal: "center" };
   }
 
-  // Add summary
-  summarySheet.getCell("A6").value = "Summary"
-  summarySheet.getCell("A6").font = { size: 14, bold: true }
+  summarySheet.getCell("A6").value = "Summary";
+  summarySheet.getCell("A6").font = { size: 14, bold: true };
 
-  summarySheet.getCell("A8").value = "Total Employees:"
-  summarySheet.getCell("B8").value = payrollItems.length
+  summarySheet.getCell("A8").value = "Total Employees:";
+  summarySheet.getCell("B8").value = payrollItems.length;
 
-  summarySheet.getCell("A9").value = "Total Gross Salary:"
-  summarySheet.getCell("B9").value = totals.totalGrossSalary
-  summarySheet.getCell("B9").numFmt = "$#,##0.00"
+  summarySheet.getCell("A9").value = "Total Gross Salary:";
+  summarySheet.getCell("B9").value = safeNumber(totals.totalGrossSalary);
+  summarySheet.getCell("B9").numFmt = "$#,##0.00";
 
-  summarySheet.getCell("A10").value = "Total Net Salary:"
-  summarySheet.getCell("B10").value = totals.totalNetSalary
-  summarySheet.getCell("B10").numFmt = "$#,##0.00"
+  summarySheet.getCell("A10").value = "Total Net Salary:";
+  summarySheet.getCell("B10").value = safeNumber(totals.totalNetSalary);
+  summarySheet.getCell("B10").numFmt = "$#,##0.00";
 
-  summarySheet.getCell("A11").value = "Total Bonuses:"
-  summarySheet.getCell("B11").value = totals.totalBonuses
-  summarySheet.getCell("B11").numFmt = "$#,##0.00"
+  summarySheet.getCell("A11").value = "Total Bonuses:";
+  summarySheet.getCell("B11").value = safeNumber(totals.totalBonuses);
+  summarySheet.getCell("B11").numFmt = "$#,##0.00";
 
-  summarySheet.getCell("A12").value = "Total Deductions:"
-  summarySheet.getCell("B12").value = totals.totalDeductions
-  summarySheet.getCell("B12").numFmt = "$#,##0.00"
+  summarySheet.getCell("A12").value = "Total Deductions:";
+  summarySheet.getCell("B12").value = safeNumber(totals.totalDeductions);
+  summarySheet.getCell("B12").numFmt = "$#,##0.00";
 
-  summarySheet.getCell("A13").value = "Total Absence Deductions:"
-  summarySheet.getCell("B13").value = totals.totalAbsenceDeduction
-  summarySheet.getCell("B13").numFmt = "$#,##0.00"
+  summarySheet.getCell("A13").value = "Total Absence Deductions:";
+  summarySheet.getCell("B13").value = safeNumber(totals.totalAbsenceDeduction);
+  summarySheet.getCell("B13").numFmt = "$#,##0.00";
 
-  // Create details worksheet
-  const detailsSheet = workbook.addWorksheet("Payroll Details")
+  const detailsSheet = workbook.addWorksheet("Payroll Details");
 
-  // Add headers
   detailsSheet.columns = [
     { header: "Employee", key: "employee", width: 30 },
     { header: "Department", key: "department", width: 20 },
@@ -1294,39 +1508,34 @@ async function generatePayrollExcel(payrollItems, totals, payrollPeriod, departm
     { header: "Gross Salary", key: "grossSalary", width: 15 },
     { header: "Net Salary", key: "netSalary", width: 15 },
     { header: "Status", key: "status", width: 15 },
-  ]
+  ];
 
-  // Style header row
-  detailsSheet.getRow(1).font = { bold: true }
+  detailsSheet.getRow(1).font = { bold: true };
 
-  // Add data
   payrollItems.forEach((item) => {
     const row = detailsSheet.addRow({
       employee: item.user_name,
       department: item.department || "",
       position: item.position || "",
-      baseSalary: Number.parseFloat(item.base_salary),
-      bonuses: Number.parseFloat(item.bonuses),
-      deductions: Number.parseFloat(item.deductions),
-      absenceDeduction: Number.parseFloat(item.absence_deduction),
-      grossSalary: Number.parseFloat(item.gross_salary),
-      netSalary: Number.parseFloat(item.net_salary),
+      baseSalary: parseFloat(item.base_salary) || 0,
+      bonuses: parseFloat(item.bonuses) || 0,
+      deductions: parseFloat(item.deductions) || 0,
+      absenceDeduction: parseFloat(item.absence_deduction) || 0,
+      grossSalary: parseFloat(item.gross_salary) || 0,
+      netSalary: parseFloat(item.net_salary) || 0,
       status: item.status,
-    })
+    });
 
-    // Format currency cells
-    row.getCell("baseSalary").numFmt = "$#,##0.00"
-    row.getCell("bonuses").numFmt = "$#,##0.00"
-    row.getCell("deductions").numFmt = "$#,##0.00"
-    row.getCell("absenceDeduction").numFmt = "$#,##0.00"
-    row.getCell("grossSalary").numFmt = "$#,##0.00"
-    row.getCell("netSalary").numFmt = "$#,##0.00"
-  })
+    row.getCell("baseSalary").numFmt = "$#,##0.00";
+    row.getCell("bonuses").numFmt = "$#,##0.00";
+    row.getCell("deductions").numFmt = "$#,##0.00";
+    row.getCell("absenceDeduction").numFmt = "$#,##0.00";
+    row.getCell("grossSalary").numFmt = "$#,##0.00";
+    row.getCell("netSalary").numFmt = "$#,##0.00";
+  });
 
-  // Create attendance worksheet
-  const attendanceSheet = workbook.addWorksheet("Attendance Details")
+  const attendanceSheet = workbook.addWorksheet("Attendance Details");
 
-  // Add headers
   attendanceSheet.columns = [
     { header: "Employee", key: "employee", width: 30 },
     { header: "Department", key: "department", width: 20 },
@@ -1335,28 +1544,24 @@ async function generatePayrollExcel(payrollItems, totals, payrollPeriod, departm
     { header: "Absent Days", key: "absentDays", width: 15 },
     { header: "Paid Leave", key: "paidLeave", width: 15 },
     { header: "Unpaid Leave", key: "unpaidLeave", width: 15 },
-  ]
+  ];
 
-  // Style header row
-  attendanceSheet.getRow(1).font = { bold: true }
+  attendanceSheet.getRow(1).font = { bold: true };
 
-  // Add data
   payrollItems.forEach((item) => {
     attendanceSheet.addRow({
       employee: item.user_name,
       department: item.department || "",
-      workingDays: item.working_days,
-      presentDays: item.present_days,
-      absentDays: item.absent_days,
-      paidLeave: item.paid_leave_days,
-      unpaidLeave: item.unpaid_leave_days,
-    })
-  })
+      workingDays: parseInt(item.working_days, 10) || 0,
+      presentDays: parseInt(item.present_days, 10) || 0,
+      absentDays: parseInt(item.absent_days, 10) || 0,
+      paidLeave: parseInt(item.paid_leave_days, 10) || 0,
+      unpaidLeave: parseInt(item.unpaid_leave_days, 10) || 0,
+    });
+  });
 
-  // Save workbook
-  await workbook.xlsx.writeFile(filePath)
-
-  return filePath
+  await workbook.xlsx.writeFile(filePath);
+  return filePath;
 }
 
 /**

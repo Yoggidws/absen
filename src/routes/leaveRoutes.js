@@ -11,6 +11,7 @@ const {
   getDepartmentLeave,
   getPendingApprovals,
   bulkUpdateLeaveStatus,
+  decideLeaveRequest,
 } = require("../controllers/leaveController")
 const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
 const { rbac } = require("../middlewares/rbacMiddleware")
@@ -50,7 +51,12 @@ router
 router
   .route("/:id")
   .get(enhancedProtect, getLeaveRequestById) // Controller handles ownership/permission check
-  .put(enhancedProtect, rbac.can("approve:leave_request"), updateLeaveRequest)
+  .put(enhancedProtect, rbac.can("update:leave_request:all"), updateLeaveRequest) // Admin override
+
+// Approve or reject a leave request
+router
+    .route("/:id/decide")
+    .put(enhancedProtect, rbac.can("approve:leave_request"), decideLeaveRequest)
 
 // Cancel a specific leave request
 router

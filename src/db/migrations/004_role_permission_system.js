@@ -3,7 +3,7 @@
  * Implements a comprehensive role-permission system
  */
 exports.up = async (knex) => {
-  return knex.schema
+  await knex.schema
     // Permissions table
     .createTable("permissions", (table) => {
       table.string("id", 36).primary().notNullable().comment("Permission ID")
@@ -70,6 +70,61 @@ exports.up = async (knex) => {
       // Composite unique constraint
       table.unique(["user_id", "role_id"])
     })
+
+  // Insert basic system roles that other migrations can rely on
+  const basicRoles = [
+    {
+      id: "role_admin",
+      name: "admin",
+      display_name: "Administrator",
+      description: "System administrator with full access",
+      is_system_role: true
+    },
+    {
+      id: "role_manager",
+      name: "manager",
+      display_name: "Manager",
+      description: "Department manager with team management access",
+      is_system_role: true
+    },
+    {
+      id: "role_hr",
+      name: "hr",
+      display_name: "HR Specialist",
+      description: "Human Resources specialist",
+      is_system_role: true
+    },
+    {
+      id: "role_hr_manager",
+      name: "hr_manager",
+      display_name: "HR Manager",
+      description: "Human Resources manager with advanced HR access",
+      is_system_role: true
+    },
+    {
+      id: "role_payroll",
+      name: "payroll",
+      display_name: "Payroll Specialist",
+      description: "Payroll specialist with payroll management access",
+      is_system_role: true
+    },
+    {
+      id: "role_employee",
+      name: "employee",
+      display_name: "Employee",
+      description: "Regular employee",
+      is_system_role: true
+    }
+  ];
+
+  // Insert roles if they don't exist
+  for (const role of basicRoles) {
+    const existingRole = await knex("roles").where({ id: role.id }).first();
+    if (!existingRole) {
+      await knex("roles").insert(role);
+      console.log(`✅ Created system role: ${role.name} (${role.id})`);
+    }
+  }
 }
 
 exports.down = async (knex) => {

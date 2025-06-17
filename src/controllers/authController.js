@@ -86,20 +86,20 @@ exports.register = asyncHandler(async (req, res) => {
       .insert({
         employee_id: userId,
         full_name: name,
-        gender: "other", // Default value, to be updated later
+        gender: "other",
         place_of_birth: "",
-        date_of_birth: new Date("1900-01-01"), // Default value, to be updated later
+        date_of_birth: new Date("1900-01-01"),
         address: "",
         phone_number: "",
         email: email,
-        marital_status: "single", // Default value, to be updated later
+        marital_status: "single",
         number_of_children: 0,
         position: position || "",
         department: department || "",
-        department_id: null, // To be updated later
-        hire_date: new Date(), // Current date as hire date
+        department_id: null,
+        hire_date: new Date(),
         employment_status: "permanent",
-        basic_salary: 0, // To be updated later
+        basic_salary: 0,
         allowance: 0,
         profile_picture: null,
         user_id: userId

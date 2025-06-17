@@ -1,9 +1,12 @@
 const { db } = require("../config/db")
 const { asyncHandler } = require("../middlewares/errorMiddleware")
+const ExcelJS = require('exceljs')
+const PDFDocument = require('pdfkit')
+const path = require('path')
+const fs = require('fs')
 
 // Helper to generate IDs, assuming a utility for this exists.
 const generateId = (prefix) => `${prefix}${Date.now()}${Math.random().toString(36).substring(2, 6)}`.toUpperCase();
-
 
 /**
  * @desc    Create a new payroll period
@@ -137,7 +140,6 @@ exports.updatePayrollItem = asyncHandler(async (req, res) => {
     }
     res.status(200).json({ success: true, data: item });
 });
-
 
 /**
  * @desc    Get payroll history for the current employee
@@ -293,3 +295,493 @@ exports.updatePayrollPeriodStatus = asyncHandler(async(req, res) => {
 exports.sendPayslipsByEmail = asyncHandler(async(req, res) => {
     res.status(501).json({success: false, message: "Emailing payslips is not implemented yet."})
 })
+
+/**
+ * @desc    Generate attendance-based payroll with meal allowances
+ * @route   GET /api/payroll/attendance-payroll
+ * @access  Private (read:payroll:all)
+ */
+exports.generateAttendanceBasedPayroll = asyncHandler(async (req, res) => {
+  const { period, generate } = req.query
+  
+  if (!period) {
+    res.status(400)
+    throw new Error("Period is required (format: YYYY-MM)")
+  }
+
+  const [year, month] = period.split('-')
+  const startDate = new Date(parseInt(year), parseInt(month) - 1, 1)
+  const endDate = new Date(parseInt(year), parseInt(month), 0)
+  
+  console.log(`Generating payroll for ${period} (${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]})`)
+
+  // Get all active users with their compensation data
+  const users = await db('users as u')
+    .join('employees as e', 'u.id', 'e.user_id')
+    .leftJoin('compensation as c', 'u.id', 'c.user_id')
+    .where('u.active', true)
+    .select(
+      'u.id as user_id',
+      'u.name',
+      'u.email', 
+      'u.department',
+      'u.position',
+      'u.role',
+      'e.basic_salary',
+      'e.allowance',
+      'c.base_salary as comp_base_salary',
+      'c.meal_allowance as comp_meal_allowance'
+    )
+
+  if (users.length === 0) {
+    res.status(404)
+    throw new Error("No active users found")
+  }
+
+  const payrollData = []
+  
+  // Calculate working days in the period (excluding weekends)
+  const totalWorkingDays = getWorkingDaysInPeriod(startDate, endDate)
+  
+  for (const user of users) {
+    // Count actual attendance days
+    const attendanceResult = await db('attendance')
+      .where('user_id', user.user_id)
+      .where('type', 'check-in')
+      .whereBetween('timestamp', [startDate, endDate])
+      .count('* as count')
+      .first()
+    
+    const daysWorked = parseInt(attendanceResult.count) || 0
+    const absenceDays = totalWorkingDays - daysWorked
+    
+    // Use compensation data if available, otherwise use employee data
+    const baseSalary = user.comp_base_salary || user.basic_salary || 0
+    const mealAllowancePerDay = user.comp_meal_allowance || user.allowance || 0
+    
+    // Calculate meal allowance based on actual attendance
+    const mealAllowanceTotal = daysWorked * mealAllowancePerDay
+    
+    // Calculate deductions (example: 5% tax, 2% insurance)
+    const grossSalary = baseSalary + mealAllowanceTotal
+    const taxDeduction = grossSalary * 0.05
+    const insuranceDeduction = grossSalary * 0.02
+    const totalDeductions = taxDeduction + insuranceDeduction
+    const netSalary = grossSalary - totalDeductions
+    
+    const payrollItem = {
+      user_id: user.user_id,
+      name: user.name,
+      email: user.email,
+      department: user.department,
+      position: user.position,
+      role: user.role,
+      base_salary: baseSalary,
+      meal_allowance_per_day: mealAllowancePerDay,
+      total_working_days: totalWorkingDays,
+      days_worked: daysWorked,
+      absence_days: absenceDays,
+      meal_allowance_total: mealAllowanceTotal,
+      gross_salary: grossSalary,
+      tax_deduction: taxDeduction,
+      insurance_deduction: insuranceDeduction,
+      total_deductions: totalDeductions,
+      net_salary: netSalary,
+      currency: 'IDR',
+      period: period
+    }
+    
+    payrollData.push(payrollItem)
+  }
+
+  // Generate Excel if requested
+  if (generate === 'excel') {
+    return await generatePayrollExcel(payrollData, period, res)
+  }
+  
+  // Generate PDF if requested  
+  if (generate === 'pdf') {
+    return await generatePayrollPDF(payrollData, period, res)
+  }
+
+  // Return JSON data
+  res.status(200).json({
+    success: true,
+    period: period,
+    total_working_days: totalWorkingDays,
+    count: payrollData.length,
+    data: payrollData
+  })
+})
+
+/**
+ * @desc    Generate individual payslip PDF
+ * @route   GET /api/payroll/payslip/:userId
+ * @access  Private
+ */
+exports.generateIndividualPayslip = asyncHandler(async (req, res) => {
+  const { userId } = req.params
+  const { period } = req.query
+  
+  if (!period) {
+    res.status(400)
+    throw new Error("Period is required (format: YYYY-MM)")
+  }
+
+  // Check if user can access this payslip
+  if (req.user.id !== userId && !req.hasPermission('read:payroll:all')) {
+    res.status(403)
+    throw new Error("Forbidden: You can only view your own payslip")
+  }
+
+  const [year, month] = period.split('-')
+  const startDate = new Date(parseInt(year), parseInt(month) - 1, 1)
+  const endDate = new Date(parseInt(year), parseInt(month), 0)
+
+  // Get user data
+  const user = await db('users as u')
+    .join('employees as e', 'u.id', 'e.user_id')
+    .leftJoin('compensation as c', 'u.id', 'c.user_id')
+    .where('u.id', userId)
+    .select(
+      'u.id as user_id',
+      'u.name',
+      'u.email',
+      'u.department', 
+      'u.position',
+      'e.basic_salary',
+      'e.allowance',
+      'c.base_salary as comp_base_salary',
+      'c.meal_allowance as comp_meal_allowance'
+    )
+    .first()
+
+  if (!user) {
+    res.status(404)
+    throw new Error("User not found")
+  }
+
+  // Calculate payroll data for this user
+  const attendanceResult = await db('attendance')
+    .where('user_id', userId)
+    .where('type', 'check-in')
+    .whereBetween('timestamp', [startDate, endDate])
+    .count('* as count')
+    .first()
+  
+  const daysWorked = parseInt(attendanceResult.count) || 0
+  const totalWorkingDays = getWorkingDaysInPeriod(startDate, endDate)
+  const absenceDays = totalWorkingDays - daysWorked
+  
+  const baseSalary = user.comp_base_salary || user.basic_salary || 0
+  const mealAllowancePerDay = user.comp_meal_allowance || user.allowance || 0
+  const mealAllowanceTotal = daysWorked * mealAllowancePerDay
+  const grossSalary = baseSalary + mealAllowanceTotal
+  const taxDeduction = grossSalary * 0.05
+  const insuranceDeduction = grossSalary * 0.02
+  const totalDeductions = taxDeduction + insuranceDeduction
+  const netSalary = grossSalary - totalDeductions
+
+  return await generateIndividualPayslipPDF(user, {
+    period,
+    base_salary: baseSalary,
+    meal_allowance_per_day: mealAllowancePerDay,
+    total_working_days: totalWorkingDays,
+    days_worked: daysWorked,
+    absence_days: absenceDays,
+    meal_allowance_total: mealAllowanceTotal,
+    gross_salary: grossSalary,
+    tax_deduction: taxDeduction,
+    insurance_deduction: insuranceDeduction,
+    total_deductions: totalDeductions,
+    net_salary: netSalary
+  }, res)
+})
+
+// Helper function to calculate working days
+function getWorkingDaysInPeriod(startDate, endDate) {
+  let workingDays = 0
+  const currentDate = new Date(startDate)
+  
+  while (currentDate <= endDate) {
+    const dayOfWeek = currentDate.getDay()
+    // 0 is Sunday, 6 is Saturday
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      workingDays++
+    }
+    currentDate.setDate(currentDate.getDate() + 1)
+  }
+  
+  return workingDays
+}
+
+// Helper function to generate Excel report
+async function generatePayrollExcel(payrollData, period, res) {
+  const workbook = new ExcelJS.Workbook()
+  const worksheet = workbook.addWorksheet('Payroll Report')
+  
+  // Set up headers
+  worksheet.columns = [
+    { header: 'Employee ID', key: 'user_id', width: 15 },
+    { header: 'Name', key: 'name', width: 25 },
+    { header: 'Department', key: 'department', width: 20 },
+    { header: 'Position', key: 'position', width: 20 },
+    { header: 'Base Salary', key: 'base_salary', width: 15 },
+    { header: 'Meal Allowance/Day', key: 'meal_allowance_per_day', width: 18 },
+    { header: 'Working Days', key: 'total_working_days', width: 15 },
+    { header: 'Days Worked', key: 'days_worked', width: 15 },
+    { header: 'Absence Days', key: 'absence_days', width: 15 },
+    { header: 'Total Meal Allowance', key: 'meal_allowance_total', width: 20 },
+    { header: 'Gross Salary', key: 'gross_salary', width: 15 },
+    { header: 'Tax Deduction', key: 'tax_deduction', width: 15 },
+    { header: 'Insurance Deduction', key: 'insurance_deduction', width: 18 },
+    { header: 'Total Deductions', key: 'total_deductions', width: 18 },
+    { header: 'Net Salary', key: 'net_salary', width: 15 }
+  ]
+
+  // Add title row
+  worksheet.mergeCells('A1:O1')
+  const titleCell = worksheet.getCell('A1')
+  titleCell.value = `Payroll Report - ${period}`
+  titleCell.font = { size: 16, bold: true }
+  titleCell.alignment = { horizontal: 'center' }
+  
+  // Add header row (row 3, since row 1 is title and row 2 is empty)
+  worksheet.insertRow(3, [])
+  
+  // Style headers
+  const headerRow = worksheet.getRow(3)
+  headerRow.values = [
+    'Employee ID', 'Name', 'Department', 'Position', 'Base Salary',
+    'Meal Allowance/Day', 'Working Days', 'Days Worked', 'Absence Days',
+    'Total Meal Allowance', 'Gross Salary', 'Tax Deduction', 
+    'Insurance Deduction', 'Total Deductions', 'Net Salary'
+  ]
+  headerRow.font = { bold: true }
+  headerRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFD3D3D3' }
+  }
+
+  // Add data rows
+  payrollData.forEach((item, index) => {
+    const row = worksheet.addRow({
+      user_id: item.user_id,
+      name: item.name,
+      department: item.department,
+      position: item.position,
+      base_salary: item.base_salary,
+      meal_allowance_per_day: item.meal_allowance_per_day,
+      total_working_days: item.total_working_days,
+      days_worked: item.days_worked,
+      absence_days: item.absence_days,
+      meal_allowance_total: item.meal_allowance_total,
+      gross_salary: item.gross_salary,
+      tax_deduction: item.tax_deduction,
+      insurance_deduction: item.insurance_deduction,
+      total_deductions: item.total_deductions,
+      net_salary: item.net_salary
+    })
+    
+    // Format currency columns
+    const currencyColumns = ['E', 'F', 'J', 'K', 'L', 'M', 'N', 'O']
+    currencyColumns.forEach(col => {
+      const cell = row.getCell(col)
+      cell.numFmt = '"Rp" #,##0'
+    })
+  })
+
+  // Add totals row
+  const totalsRow = worksheet.addRow({
+    user_id: '',
+    name: 'TOTAL',
+    department: '',
+    position: '',
+    base_salary: payrollData.reduce((sum, item) => sum + item.base_salary, 0),
+    meal_allowance_per_day: '',
+    total_working_days: '',
+    days_worked: payrollData.reduce((sum, item) => sum + item.days_worked, 0),
+    absence_days: payrollData.reduce((sum, item) => sum + item.absence_days, 0),
+    meal_allowance_total: payrollData.reduce((sum, item) => sum + item.meal_allowance_total, 0),
+    gross_salary: payrollData.reduce((sum, item) => sum + item.gross_salary, 0),
+    tax_deduction: payrollData.reduce((sum, item) => sum + item.tax_deduction, 0),
+    insurance_deduction: payrollData.reduce((sum, item) => sum + item.insurance_deduction, 0),
+    total_deductions: payrollData.reduce((sum, item) => sum + item.total_deductions, 0),
+    net_salary: payrollData.reduce((sum, item) => sum + item.net_salary, 0)
+  })
+  
+  totalsRow.font = { bold: true }
+  totalsRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFCC00' }
+  }
+
+  const filename = `payroll-report-${period}-${Date.now()}.xlsx`
+  const filepath = path.join(__dirname, '../../uploads/reports', filename)
+  
+  // Ensure directory exists
+  const dir = path.dirname(filepath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+
+  await workbook.xlsx.writeFile(filepath)
+  
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+  
+  const fileStream = fs.createReadStream(filepath)
+  fileStream.pipe(res)
+  
+  // Clean up file after sending
+  fileStream.on('end', () => {
+    fs.unlink(filepath, (err) => {
+      if (err) console.error('Error deleting temporary file:', err)
+    })
+  })
+}
+
+// Helper function to generate overall payroll PDF
+async function generatePayrollPDF(payrollData, period, res) {
+  const doc = new PDFDocument({ margin: 50, size: 'A4' })
+  const filename = `payroll-summary-${period}-${Date.now()}.pdf`
+  const filepath = path.join(__dirname, '../../uploads/reports', filename)
+  
+  // Ensure directory exists
+  const dir = path.dirname(filepath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+
+  const stream = fs.createWriteStream(filepath)
+  doc.pipe(stream)
+  
+  // Title
+  doc.fontSize(20).text('Payroll Summary Report', { align: 'center' })
+  doc.fontSize(14).text(`Period: ${period}`, { align: 'center' })
+  doc.moveDown(2)
+  
+  // Summary table
+  const totalGross = payrollData.reduce((sum, item) => sum + item.gross_salary, 0)
+  const totalNet = payrollData.reduce((sum, item) => sum + item.net_salary, 0)
+  const totalDeductions = payrollData.reduce((sum, item) => sum + item.total_deductions, 0)
+  
+  doc.fontSize(12)
+  doc.text(`Total Employees: ${payrollData.length}`)
+  doc.text(`Total Gross Salary: Rp ${totalGross.toLocaleString('id-ID')}`)
+  doc.text(`Total Deductions: Rp ${totalDeductions.toLocaleString('id-ID')}`)
+  doc.text(`Total Net Salary: Rp ${totalNet.toLocaleString('id-ID')}`)
+  doc.moveDown(2)
+  
+  // Employee details
+  doc.text('Employee Details:', { underline: true })
+  doc.moveDown()
+  
+  payrollData.forEach((employee, index) => {
+    if (doc.y > 700) { // Check if we need a new page
+      doc.addPage()
+    }
+    
+    doc.text(`${index + 1}. ${employee.name} (${employee.department})`)
+    doc.text(`   Position: ${employee.position}`)
+    doc.text(`   Days Worked: ${employee.days_worked}/${employee.total_working_days}`)
+    doc.text(`   Base Salary: Rp ${employee.base_salary.toLocaleString('id-ID')}`)
+    doc.text(`   Meal Allowance: Rp ${employee.meal_allowance_total.toLocaleString('id-ID')}`)
+    doc.text(`   Net Salary: Rp ${employee.net_salary.toLocaleString('id-ID')}`)
+    doc.moveDown()
+  })
+  
+  doc.end()
+  
+  stream.on('finish', () => {
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    
+    const fileStream = fs.createReadStream(filepath)
+    fileStream.pipe(res)
+    
+    // Clean up file after sending
+    fileStream.on('end', () => {
+      fs.unlink(filepath, (err) => {
+        if (err) console.error('Error deleting temporary file:', err)
+      })
+    })
+  })
+}
+
+// Helper function to generate individual payslip PDF
+async function generateIndividualPayslipPDF(user, payrollData, res) {
+  const doc = new PDFDocument({ margin: 50, size: 'A4' })
+  const filename = `payslip-${user.name.replace(/\s+/g, '-')}-${payrollData.period}-${Date.now()}.pdf`
+  const filepath = path.join(__dirname, '../../uploads/reports', filename)
+  
+  // Ensure directory exists
+  const dir = path.dirname(filepath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+
+  const stream = fs.createWriteStream(filepath)
+  doc.pipe(stream)
+  
+  // Header
+  doc.fontSize(20).text('PAYSLIP', { align: 'center' })
+  doc.moveDown()
+  
+  // Employee Info
+  doc.fontSize(12)
+  doc.text(`Employee: ${user.name}`)
+  doc.text(`Employee ID: ${user.user_id}`)
+  doc.text(`Department: ${user.department}`)
+  doc.text(`Position: ${user.position}`)
+  doc.text(`Pay Period: ${payrollData.period}`)
+  doc.moveDown()
+  
+  // Earnings section
+  doc.text('EARNINGS:', { underline: true })
+  doc.text(`Base Salary: Rp ${payrollData.base_salary.toLocaleString('id-ID')}`)
+  doc.text(`Meal Allowance (${payrollData.days_worked} days × Rp ${payrollData.meal_allowance_per_day.toLocaleString('id-ID')}): Rp ${payrollData.meal_allowance_total.toLocaleString('id-ID')}`)
+  doc.text(`Gross Salary: Rp ${payrollData.gross_salary.toLocaleString('id-ID')}`, { underline: true })
+  doc.moveDown()
+  
+  // Deductions section
+  doc.text('DEDUCTIONS:', { underline: true })
+  doc.text(`Tax (5%): Rp ${payrollData.tax_deduction.toLocaleString('id-ID')}`)
+  doc.text(`Insurance (2%): Rp ${payrollData.insurance_deduction.toLocaleString('id-ID')}`)
+  doc.text(`Total Deductions: Rp ${payrollData.total_deductions.toLocaleString('id-ID')}`, { underline: true })
+  doc.moveDown()
+  
+  // Net salary
+  doc.fontSize(14).text(`NET SALARY: Rp ${payrollData.net_salary.toLocaleString('id-ID')}`, { 
+    align: 'center',
+    underline: true,
+    font: 'Helvetica-Bold'
+  })
+  doc.moveDown(2)
+  
+  // Attendance summary
+  doc.fontSize(12).text('ATTENDANCE SUMMARY:', { underline: true })
+  doc.text(`Total Working Days: ${payrollData.total_working_days}`)
+  doc.text(`Days Worked: ${payrollData.days_worked}`)
+  doc.text(`Absence Days: ${payrollData.absence_days}`)
+  doc.text(`Attendance Rate: ${((payrollData.days_worked / payrollData.total_working_days) * 100).toFixed(1)}%`)
+  
+  doc.end()
+  
+  stream.on('finish', () => {
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    
+    const fileStream = fs.createReadStream(filepath)
+    fileStream.pipe(res)
+    
+    // Clean up file after sending
+    fileStream.on('end', () => {
+      fs.unlink(filepath, (err) => {
+        if (err) console.error('Error deleting temporary file:', err)
+      })
+    })
+  })
+}

@@ -59,6 +59,7 @@ const RBAC_CONFIG = {
 
 /**
  * Enhanced user authentication with role/permission loading
+ * Optimized version with better caching and simpler queries
  */
 const loadUserAuthData = async (userId, useCache = true) => {
   const cacheKey = `auth_${userId}`
@@ -70,84 +71,138 @@ const loadUserAuthData = async (userId, useCache = true) => {
     }
   }
 
-  const authData = await db.raw(`
-    SELECT 
-      u.id, u.name, u.email, u.role as legacy_role, u.department, u.position, 
-      u.avatar, u.active, u.created_at,
-      COALESCE(
-        JSON_AGG(
-          DISTINCT JSONB_BUILD_OBJECT(
-            'id', r.id,
-            'name', r.name,
-            'display_name', r.display_name,
-            'is_system_role', r.is_system_role
-          )
-        ) FILTER (WHERE r.id IS NOT NULL), 
-        '[]'
-      ) as roles,
-      COALESCE(
-        JSON_AGG(
-          DISTINCT JSONB_BUILD_OBJECT(
-            'id', p.id,
-            'name', p.name,
-            'category', p.category,
-            'description', p.description
-          )
-        ) FILTER (WHERE p.id IS NOT NULL),
-        '[]'
-      ) as permissions
-    FROM users u
-    LEFT JOIN user_roles ur ON u.id = ur.user_id
-    LEFT JOIN roles r ON ur.role_id = r.id
-    LEFT JOIN role_permissions rp ON r.id = rp.role_id
-    LEFT JOIN permissions p ON rp.permission_id = p.id
-    WHERE u.id = ? AND u.active = true
-    GROUP BY u.id
-  `, [userId])
+  try {
+    // Step 1: Get basic user data with timeout
+    const userQuery = db('users')
+      .where('id', userId)
+      .where('active', true)
+      .select('id', 'name', 'email', 'role as legacy_role', 'department', 'position', 'avatar', 'active', 'created_at')
+      .first()
+      .timeout(5000); // 5 second timeout for user query
 
-  const userData = authData.rows[0]
-  if (!userData) {
-    throw new Error('User not found or inactive')
+    // Step 2: Get user roles with timeout  
+    const rolesQuery = db('user_roles as ur')
+      .join('roles as r', 'ur.role_id', 'r.id')
+      .where('ur.user_id', userId)
+      .select('r.id', 'r.name', 'r.display_name', 'r.is_system_role')
+      .timeout(5000); // 5 second timeout for roles query
+
+    // Execute both queries in parallel with timeout protection
+    const [userData, userRoles] = await Promise.all([
+      Promise.race([
+        userQuery,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('User query timeout')), 6000)
+        )
+      ]),
+      Promise.race([
+        rolesQuery,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Roles query timeout')), 6000)
+        )
+      ])
+    ]);
+
+    if (!userData) {
+      throw new Error('User not found or inactive')
+    }
+
+    // Step 3: Get permissions for user roles (only if user has roles)
+    let userPermissions = [];
+    if (userRoles && userRoles.length > 0) {
+      const roleIds = userRoles.map(r => r.id);
+      
+      const permissionsQuery = db('role_permissions as rp')
+        .join('permissions as p', 'rp.permission_id', 'p.id')
+        .whereIn('rp.role_id', roleIds)
+        .select('p.id', 'p.name', 'p.category', 'p.description')
+        .timeout(5000); // 5 second timeout for permissions query
+
+      userPermissions = await Promise.race([
+        permissionsQuery,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Permissions query timeout')), 6000)
+        )
+      ]);
+    }
+
+    const roleNames = (userRoles || []).map(r => r.name);
+    let permissionNames = (userPermissions || []).map(p => p.name);
+
+    // If user has admin role, grant all permissions for client-side checks
+    if (roleNames.includes('admin') || roleNames.includes('super_admin')) {
+      permissionNames = ['*'];
+    }
+
+    const result = {
+      user: {
+        id: userData.id,
+        name: userData.name,
+        email: userData.email,
+        department: userData.department,
+        position: userData.position,
+        avatar: userData.avatar,
+        active: userData.active,
+        created_at: userData.created_at,
+        legacy_role: userData.legacy_role
+      },
+      roles: userRoles || [],
+      permissions: userPermissions || [],
+      roleNames: roleNames,
+      permissionNames: permissionNames
+    }
+
+    // Cache the result with longer TTL for performance
+    if (useCache) {
+      permissionCache.set(cacheKey, {
+        data: result,
+        timestamp: Date.now()
+      })
+
+      // Auto-expire cache
+      setTimeout(() => permissionCache.delete(cacheKey), CACHE_TTL)
+    }
+
+    return result;
+
+  } catch (error) {
+    console.error(`Error loading user auth data for user ${userId}:`, error.message);
+    
+    // Fallback: Return basic user data with legacy role if complex query fails
+    try {
+      const basicUser = await db('users')
+        .where('id', userId)
+        .where('active', true)
+        .select('id', 'name', 'email', 'role as legacy_role', 'department', 'position', 'avatar', 'active', 'created_at')
+        .first()
+        .timeout(3000);
+
+      if (basicUser) {
+        console.warn(`Using fallback auth data for user ${userId}`);
+        return {
+          user: {
+            id: basicUser.id,
+            name: basicUser.name,
+            email: basicUser.email,
+            department: basicUser.department,
+            position: basicUser.position,
+            avatar: basicUser.avatar,
+            active: basicUser.active,
+            created_at: basicUser.created_at,
+            legacy_role: basicUser.legacy_role
+          },
+          roles: [],
+          permissions: [],
+          roleNames: basicUser.legacy_role ? [basicUser.legacy_role] : [],
+          permissionNames: basicUser.legacy_role === 'admin' ? ['*'] : []
+        };
+      }
+    } catch (fallbackError) {
+      console.error(`Fallback query also failed for user ${userId}:`, fallbackError.message);
+    }
+    
+    throw error;
   }
-
-  const roleNames = (userData.roles || []).map(r => r.name);
-  let permissionNames = (userData.permissions || []).map(p => p.name);
-
-  // If user has admin role, grant all permissions for client-side checks
-  if (roleNames.includes('admin') || roleNames.includes('super_admin')) {
-    permissionNames = ['*'];
-  }
-
-  const result = {
-    user: {
-      id: userData.id,
-      name: userData.name,
-      email: userData.email,
-      department: userData.department,
-      position: userData.position,
-      avatar: userData.avatar,
-      active: userData.active,
-      created_at: userData.created_at,
-      legacy_role: userData.legacy_role
-    },
-    roles: userData.roles || [],
-    permissions: userData.permissions || [],
-    roleNames: roleNames,
-    permissionNames: permissionNames
-  }
-
-  // Cache the result
-  if (useCache) {
-    permissionCache.set(cacheKey, {
-      data: result,
-      timestamp: Date.now()
-    })
-
-    // Auto-expire cache
-    setTimeout(() => permissionCache.delete(cacheKey), CACHE_TTL)
-  }
-
-  return result
 }
 
 /**

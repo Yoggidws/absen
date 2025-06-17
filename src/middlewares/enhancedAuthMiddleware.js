@@ -9,7 +9,7 @@ require("dotenv").config()
 const authCache = new Map()
 const rateLimitCache = new Map()
 const blacklistedTokens = new Set()
-const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+const CACHE_TTL = 15 * 60 * 1000 // Increase to 15 minutes for better performance
 
 /**
  * Rate limiting per user
@@ -96,7 +96,12 @@ const enhancedProtect = asyncHandler(async (req, res, next) => {
       }
 
       // Load complete auth data using RBAC system
-      const authData = await loadUserAuthData(decoded.id)
+      const authData = await Promise.race([
+        loadUserAuthData(decoded.id),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Auth data loading timeout')), 8000)
+        )
+      ]);
       const { user, roleNames, permissionNames } = authData
       
       if (!user.active) {

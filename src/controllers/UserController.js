@@ -62,7 +62,7 @@ const getUserById = asyncHandler(async (req, res) => {
  * @access  Private (create:user)
  */
 const createUser = asyncHandler(async (req, res) => {
-  const { name, email, password, role, department, position } = req.body
+  const { name, email, password, role, department, position, gender, date_of_birth, marital_status, address, phone_number, place_of_birth, basic_salary, number_of_children } = req.body
 
   const userExists = await db("users").where({ email }).first()
   if (userExists) {
@@ -104,12 +104,20 @@ const createUser = asyncHandler(async (req, res) => {
     await trx('employees').insert({
         employee_id: userId,
         full_name: name,
+        gender: gender || 'other',
         email: email,
-        position: position,
-        department: department,
+        position: position || 'N/A',
+        department: department || 'N/A',
         hire_date: new Date(),
         employment_status: 'permanent',
-        user_id: userId
+        user_id: userId,
+        date_of_birth: date_of_birth || '1970-01-01',
+        marital_status: marital_status || 'single',
+        address: address || 'N/A',
+        phone_number: phone_number || 'N/A',
+        place_of_birth: place_of_birth || 'N/A',
+        basic_salary: basic_salary || 0,
+        number_of_children: number_of_children || 0
     });
     
     delete newUser.password

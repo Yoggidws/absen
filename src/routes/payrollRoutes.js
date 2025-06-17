@@ -19,6 +19,10 @@ const {
   updatePayrollItem,
   getPayrollStats,
   sendPayslipsByEmail,
+  
+  // --- New attendance-based payroll ---
+  generateAttendanceBasedPayroll,
+  generateIndividualPayslip,
 } = require("../controllers/payrollController")
 const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
 const { rbac } = require("../middlewares/rbacMiddleware")
@@ -47,10 +51,20 @@ router
   .route("/payslips/:id/pdf")
   .get(enhancedProtect, rbac.can("read:payroll:own"), generatePayslipPDF)
 
+// Generate individual payslip based on attendance (new)
+router
+  .route("/payslip/:userId")
+  .get(enhancedProtect, generateIndividualPayslip)
+
 
 // =================================================================
 //                 ADMIN & PAYROLL ROUTES
 // =================================================================
+
+// Generate attendance-based payroll (new)
+router
+  .route("/attendance-payroll")
+  .get(enhancedProtect, rbac.can("read:payroll:all"), generateAttendanceBasedPayroll)
 
 // Manage payroll periods
 router

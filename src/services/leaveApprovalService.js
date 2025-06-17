@@ -166,20 +166,20 @@ class LeaveApprovalService {
             approved_at: new Date(),
           })
         
-        let finalLeaveStatus = decision
+        let finalStatus = decision
         
         await transaction("leave_requests")
           .where({ id: leaveRequestId })
           .update({
-            status: finalLeaveStatus,
+            status: finalStatus,
             approved_by: actingUserId,
             approval_notes: comments || workflowEntry.comments,
             updated_at: new Date(),
           })
         
-        console.log(`Leave request ${leaveRequestId} status updated to ${finalLeaveStatus} by ${actingUserId}`)
+        console.log(`Leave request ${leaveRequestId} status updated to ${finalStatus} by ${actingUserId}`)
 
-        if (finalLeaveStatus === "approved") {
+        if (finalStatus === "approved") {
           await this.updateLeaveBalance(leaveRequestId, transaction, actingUserId)
         }
 
@@ -398,14 +398,162 @@ class LeaveApprovalService {
   }
   
   async _isUserTheOnlyOwnerOrAdmin(userId, trx) {
-    const queryDb = trx || db
-    const owners = await queryDb("users").where({ is_owner: true, active: true })
-    if (owners.length > 0) {
-        return owners.length === 1 && owners[0].id === userId
+    const ownerOrAdminCount = await (trx || db)("users")
+      .whereIn("role", ["owner", "admin"])
+      .andWhere("active", true)
+      .count("id as count")
+      .first()
+
+    return parseInt(ownerOrAdminCount.count) === 1
+  }
+
+  /**
+   * Create a new leave request and initialize the approval workflow
+   * @param {Object} leaveData - The leave request data
+   * @returns {Promise<Object>} - The created leave request and workflow
+   */
+  async createLeaveRequestAndInitializeWorkflow(leaveData) {
+    return await db.transaction(async (trx) => {
+      try {
+        // Generate a unique ID for the leave request
+        const leaveRequestId = generateLeaveId("LR")
+
+        // Create the leave request
+        const [leaveRequest] = await trx("leave_requests")
+          .insert({
+            id: leaveRequestId,
+            user_id: leaveData.user_id,
+            type: leaveData.type,
+            start_date: leaveData.start_date,
+            end_date: leaveData.end_date,
+            reason: leaveData.reason,
+            status: "pending",
+            current_approval_level: 1,
+          })
+          .returning("*")
+
+        // Initialize the approval workflow
+        const workflow = await this.initializeWorkflow(leaveRequestId, leaveData.user_id, trx)
+
+        return { leaveRequest, workflow }
+      } catch (error) {
+        console.error("Error creating leave request and workflow:", error)
+        throw error
+      }
+    })
+  }
+
+  /**
+   * Get a leave request with its approval workflow
+   * @param {string} leaveRequestId - The ID of the leave request
+   * @returns {Promise<Object>} - The leave request with workflow details
+   */
+  async getLeaveRequestWithWorkflow(leaveRequestId) {
+    try {
+      // Get the leave request details
+      const leaveRequest = await db("leave_requests as lr")
+        .join("users as u", "lr.user_id", "u.id")
+        .leftJoin("users as a", "lr.approved_by", "a.id")
+        .select(
+          "lr.*",
+          "u.name as user_name",
+          "u.email as user_email",
+          "u.department as user_department",
+          "a.name as approved_by_name"
+        )
+        .where("lr.id", leaveRequestId)
+        .first()
+
+      if (!leaveRequest) {
+        return null
+      }
+
+      // Get the approval workflow
+      const workflow = await this.getApprovalWorkflow(leaveRequestId)
+
+      return {
+        ...leaveRequest,
+        workflow
+      }
+    } catch (error) {
+      console.error("Error getting leave request with workflow:", error)
+      throw error
     }
-    const admins = await queryDb("users").where({ role: 'admin', active: true })
-    return admins.length === 1 && admins[0].id === userId
+  }
+
+  /**
+   * Cancel a leave request
+   * @param {string} leaveRequestId - The ID of the leave request
+   * @param {string} userId - The ID of the user cancelling the request
+   * @returns {Promise<Object>} - The updated leave request
+   */
+  async cancelLeaveRequest(leaveRequestId, userId) {
+    return await db.transaction(async (trx) => {
+      try {
+        // Get the leave request
+        const leaveRequest = await trx("leave_requests")
+          .where({ id: leaveRequestId })
+          .first()
+
+        if (!leaveRequest) {
+          throw new Error("Leave request not found")
+        }
+
+        // Check if user can cancel this request
+        if (leaveRequest.user_id !== userId && !await this._userCanManageRequest(userId, leaveRequest, trx)) {
+          throw new Error("You are not authorized to cancel this leave request")
+        }
+
+        // Check if request can be cancelled
+        if (leaveRequest.status !== "pending") {
+          throw new Error("Only pending leave requests can be cancelled")
+        }
+
+        // Update the leave request status
+        const [updatedRequest] = await trx("leave_requests")
+          .where({ id: leaveRequestId })
+          .update({
+            status: "cancelled",
+            updated_at: new Date()
+          })
+          .returning("*")
+
+        // Update any pending workflow entries
+        await trx("leave_approval_workflow")
+          .where({ leave_request_id: leaveRequestId, status: "pending" })
+          .update({
+            status: "cancelled",
+            comments: "Request cancelled by user",
+            approved_at: new Date()
+          })
+
+        return updatedRequest
+      } catch (error) {
+        console.error("Error cancelling leave request:", error)
+        throw error
+      }
+    })
+  }
+
+  /**
+   * Check if a user can manage a leave request (for admins/managers)
+   * @private
+   */
+  async _userCanManageRequest(userId, leaveRequest, trx) {
+    const user = await trx("users").where({ id: userId }).first()
+    if (!user) return false
+
+    // Admins can manage any request
+    if (user.role === "admin" || user.is_owner) return true
+
+    // Managers can manage requests from their department
+    if (user.role === "manager") {
+      const requester = await trx("users").where({ id: leaveRequest.user_id }).first()
+      return requester && requester.department === user.department
+    }
+
+    return false
   }
 }
 
-module.exports = new LeaveApprovalService()
+module.exports = LeaveApprovalService

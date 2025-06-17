@@ -14,15 +14,25 @@ exports.up = async function (knex) {
     console.log(`✅ Inserted permission: ${PERMISSION_NAME}`);
   }
 
-  // 2. Ensure the role exists
-  const role = await knex("roles").where({ name: ROLE_NAME }).first();
+  // 2. Try to find the admin role - check both role_admin and name='admin'
+  let role = await knex("roles").where({ id: "role_admin" }).first();
   if (!role) {
-    console.error(`Role '${ROLE_NAME}' not found. Skipping permission assignment.`);
+    role = await knex("roles").where({ name: ROLE_NAME }).first();
+  }
+  
+  if (!role) {
+    console.log(`Role '${ROLE_NAME}' not found. This will be handled during seeding.`);
     return;
   }
 
   // 3. Get the IDs for the role and permission
-  const permissionId = (await knex("permissions").where({ name: PERMISSION_NAME }).first()).id;
+  const permissionRecord = await knex("permissions").where({ name: PERMISSION_NAME }).first();
+  if (!permissionRecord) {
+    console.log(`Permission '${PERMISSION_NAME}' not found after insert. Skipping assignment.`);
+    return;
+  }
+
+  const permissionId = permissionRecord.id;
   const roleId = role.id;
 
   // 4. Check if the role already has the permission
@@ -39,7 +49,7 @@ exports.up = async function (knex) {
       role_id: roleId,
       permission_id: permissionId,
     });
-    console.log(`✅ Assigned permission '${PERMISSION_NAME}' to role '${ROLE_NAME}'`);
+    console.log(`✅ Assigned permission '${PERMISSION_NAME}' to role '${ROLE_NAME}' (${roleId})`);
   } else {
     console.log(`Permission '${PERMISSION_NAME}' already assigned to role '${ROLE_NAME}'. Skipping.`);
   }
@@ -48,7 +58,10 @@ exports.up = async function (knex) {
 exports.down = async function (knex) {
   // Find the permission and role IDs
   const permission = await knex("permissions").where({ name: PERMISSION_NAME }).first();
-  const role = await knex("roles").where({ name: ROLE_NAME }).first();
+  let role = await knex("roles").where({ id: "role_admin" }).first();
+  if (!role) {
+    role = await knex("roles").where({ name: ROLE_NAME }).first();
+  }
 
   if (permission && role) {
     // Remove the role-permission mapping

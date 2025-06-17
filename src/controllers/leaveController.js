@@ -1,62 +1,91 @@
 const { db } = require("../config/db")
 const { asyncHandler } = require("../middlewares/errorMiddleware")
-const { sendLeaveNotification } = require("../utils/notificationUtils")
+const LeaveApprovalService = require("../services/leaveApprovalService")
 const employeeLeaveBalanceService = require("../services/employeeLeaveBalanceService")
 
+const leaveApprovalService = new LeaveApprovalService()
+
 /**
- * @desc    Create a new leave request
+ * @desc    Create a new leave request and initialize approval workflow
  * @route   POST /api/leave
  * @access  Private
  */
 exports.createLeaveRequest = asyncHandler(async (req, res) => {
-  const { type, start_date, end_date, reason } = req.body
+  const { type, startDate, endDate, reason } = req.body
   const userId = req.user.id
 
-  if (!type || !start_date || !end_date || !reason) {
-    res.status(400)
-    throw new Error("Please provide all required fields for the leave request.")
+  // Basic validation
+  if (!type || !startDate || !endDate || !reason) {
+    res.status(400).json({ message: "Please provide all required fields." })
+    return
+  }
+  
+  // More robust date validation
+  const start = new Date(startDate)
+  const end = new Date(endDate)
+  if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) {
+      res.status(400).json({ message: "Invalid start or end date." });
+      return;
   }
 
-  // More validation can be added here (e.g., date validation, balance check)
+  // Use the service to create the request and initialize the workflow
+  const { leaveRequest, workflow } = await leaveApprovalService.createLeaveRequestAndInitializeWorkflow({
+    user_id: userId,
+    type,
+    start_date: start,
+    end_date: end,
+    reason,
+  })
 
-  const [leaveRequest] = await db("leave_requests")
-    .insert({
-      user_id: userId,
-      type,
-      start_date,
-      end_date,
-      reason,
-      status: "pending",
-    })
-    .returning("*")
-
-  res.status(201).json({ success: true, data: leaveRequest })
+  res.status(201).json({
+    success: true,
+    message: "Leave request submitted successfully and workflow initiated.",
+    data: leaveRequest,
+    workflow,
+  })
 })
 
 /**
- * @desc    Get all leave requests (or own requests)
+ * @desc    Get all leave requests based on user role and permissions
  * @route   GET /api/leave
  * @access  Private
  */
 exports.getAllLeaveRequests = asyncHandler(async (req, res) => {
+  const { status, startDate, endDate, userId: queryUserId } = req.query
+  const actingUserId = req.user.id
+  
+  const canReadAll = req.hasPermission("read:leave_request:all")
+  
+  let targetUserId = canReadAll && queryUserId ? queryUserId : actingUserId
+  
+  // If not admin and no specific user is requested, it's for the acting user
+  if (!canReadAll) {
+    targetUserId = actingUserId
+  }
+
+  // Build a query using Knex...
   let query = db("leave_requests as lr")
     .join("users as u", "lr.user_id", "u.id")
     .leftJoin("users as a", "lr.approved_by", "a.id")
     .select(
-        "lr.id", "u.name as user_name", "u.department", "lr.type", 
-        "lr.start_date", "lr.end_date", "lr.reason", "lr.status",
-        "a.name as approver_name"
+      "lr.id", "u.name as user_name", "u.department", "lr.type", 
+      "lr.start_date", "lr.end_date", "lr.reason", "lr.status",
+      "a.name as approver_name", "lr.created_at"
     )
 
-  // Use the new rbac helpers if they exist, otherwise fallback to old structure
-  // const hasPermission = req.hasPermission || ((p) => req.user?.permissions?.includes(p));
-
-  if (!req.hasPermission("read:leave_request:all")) {
-    query = query.where("lr.user_id", req.user.id)
+  if (!canReadAll) {
+    query = query.where("lr.user_id", actingUserId)
+  } else if (queryUserId) {
+    query = query.where("lr.user_id", queryUserId)
   }
 
-  const leaveRequests = await query.orderBy("lr.created_at", "desc")
+  // Add filters
+  if (status) query.where("lr.status", status);
+  if (startDate) query.where("lr.start_date", ">=", startDate);
+  if (endDate) query.where("lr.end_date", "<=", endDate);
 
+  const leaveRequests = await query.orderBy("lr.created_at", "desc");
+  
   res.status(200).json({
     success: true,
     count: leaveRequests.length,
@@ -64,47 +93,79 @@ exports.getAllLeaveRequests = asyncHandler(async (req, res) => {
   })
 })
 
+
 /**
- * @desc    Get a single leave request by ID
+ * @desc    Get a single leave request by ID, with workflow details
  * @route   GET /api/leave/:id
  * @access  Private
  */
 exports.getLeaveRequestById = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  const leaveRequest = await db("leave_requests as lr")
-    .join("users as u", "lr.user_id", "u.id")
-    .leftJoin("users as a", "lr.approved_by", "a.id")
-    .select(
-        "lr.*", "u.name as user_name", "u.email as user_email", 
-        "u.department", "a.name as approver_name"
-    )
-    .where("lr.id", id)
-    .first();
+  const { id } = req.params
+  const leaveRequest = await leaveApprovalService.getLeaveRequestWithWorkflow(id)
 
   if (!leaveRequest) {
-    res.status(404);
-    throw new Error("Leave request not found");
+    res.status(404)
+    throw new Error("Leave request not found")
   }
 
-  if (leaveRequest.user_id !== req.user.id && !req.hasPermission("read:leave_request:all")) {
-    res.status(403);
-    throw new Error("Forbidden: You do not have permission to view this leave request.");
+  // Service-level or RBAC middleware should handle authorization
+  // For now, basic check:
+  if (req.user.id !== leaveRequest.user_id && !req.hasPermission("read:leave_request:all")) {
+     res.status(403)
+     throw new Error("You are not authorized to view this leave request.")
   }
 
-  res.status(200).json({ success: true, data: leaveRequest });
-});
+  res.status(200).json({ success: true, data: leaveRequest })
+})
 
 /**
- * @desc    Update a leave request (status)
- * @route   PUT /api/leave/:id
+ * @desc    Approve or reject a leave request
+ * @route   PUT /api/leave/:id/decide
  * @access  Private (Manager/HR/Admin)
+ */
+exports.decideLeaveRequest = asyncHandler(async (req, res) => {
+  const { id } = req.params
+  const { decision, comments } = req.body // decision: "approved" or "rejected"
+  const actingUserId = req.user.id
+
+  if (!["approved", "rejected"].includes(decision)) {
+    res.status(400)
+    throw new Error("Invalid decision. Must be 'approved' or 'rejected'.")
+  }
+
+  // Get the leave request to determine the current approval level
+  const leaveRequest = await db("leave_requests").where({ id }).first()
+  if (!leaveRequest) {
+    res.status(404)
+    throw new Error("Leave request not found")
+  }
+
+  const result = await leaveApprovalService.processApproval(
+    id, 
+    leaveRequest.current_approval_level || 1, 
+    actingUserId, 
+    decision, 
+    comments
+  )
+
+  res.status(200).json({
+    success: true,
+    message: `Leave request has been ${decision}.`,
+    data: result,
+  })
+})
+
+/**
+ * @desc    Update a leave request (generic update, for admin changes)
+ * @route   PUT /api/leave/:id
+ * @access  Private (Admin)
  */
 exports.updateLeaveRequest = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { status, comments } = req.body;
     const approverId = req.user.id;
 
+    // This remains a simple update for admin overrides, bypassing complex workflow logic
     const [updatedRequest] = await db("leave_requests")
         .where({ id })
         .update({
@@ -115,6 +176,9 @@ exports.updateLeaveRequest = asyncHandler(async (req, res) => {
         })
         .returning("*");
     
+    // Note: This does not trigger balance updates or notifications.
+    // Use the decideLeaveRequest endpoint for standard approvals.
+    
     res.status(200).json({ success: true, data: updatedRequest });
 });
 
@@ -124,34 +188,17 @@ exports.updateLeaveRequest = asyncHandler(async (req, res) => {
  * @access  Private
  */
 exports.cancelLeaveRequest = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const userId = req.user.id;
+  const { id } = req.params
+  const actingUserId = req.user.id
 
-  const leaveRequest = await db("leave_requests").where({ id }).first();
+  const updatedRequest = await leaveApprovalService.cancelLeaveRequest(id, actingUserId)
 
-  if (!leaveRequest) {
-    res.status(404);
-    throw new Error("Leave request not found");
-  }
-
-  if (leaveRequest.user_id !== userId) {
-    res.status(403);
-    throw new Error("Forbidden: You can only cancel your own leave requests.");
-  }
-
-  if (leaveRequest.status !== 'pending' && leaveRequest.status !== 'approved') {
-    res.status(400);
-    throw new Error(`Cannot cancel a leave request with status '${leaveRequest.status}'`);
-  }
-
-  const [updatedRequest] = await db("leave_requests")
-    .where({ id })
-    .update({ status: 'cancelled', updated_at: db.fn.now() })
-    .returning("*");
-
-  res.status(200).json({ success: true, data: updatedRequest });
-});
-
+  res.status(200).json({
+    success: true,
+    message: "Leave request cancelled successfully.",
+    data: updatedRequest,
+  })
+})
 
 /**
  * @desc    Get leave balance for the current user
@@ -159,10 +206,9 @@ exports.cancelLeaveRequest = asyncHandler(async (req, res) => {
  * @access  Private
  */
 exports.getLeaveBalance = asyncHandler(async (req, res) => {
-    const balance = await employeeLeaveBalanceService.getEmployeeLeaveBalance(req.user.id);
-    res.status(200).json({ success: true, data: balance });
-});
-
+  const balance = await employeeLeaveBalanceService.getEmployeeLeaveBalance(req.user.id)
+  res.status(200).json({ success: true, data: balance })
+})
 
 /**
  * @desc    Get leave statistics
@@ -170,13 +216,12 @@ exports.getLeaveBalance = asyncHandler(async (req, res) => {
  * @access  Private (HR/Admin)
  */
 exports.getLeaveStats = asyncHandler(async (req, res) => {
-    const stats = await db('leave_requests')
-        .select('status')
-        .count('* as count')
-        .groupBy('status');
-    res.status(200).json({ success: true, data: stats });
-});
-
+  const stats = await db("leave_requests")
+    .select("status")
+    .count("* as count")
+    .groupBy("status")
+  res.status(200).json({ success: true, data: stats })
+})
 
 /**
  * @desc    Get leave requests for a department
@@ -184,36 +229,23 @@ exports.getLeaveStats = asyncHandler(async (req, res) => {
  * @access  Private (Manager/HR/Admin)
  */
 exports.getDepartmentLeave = asyncHandler(async (req, res) => {
-    const userDepartment = req.user.department;
-    
-    const leaveRequests = await db('leave_requests as lr')
-        .join('users as u', 'lr.user_id', 'u.id')
-        .where('u.department', userDepartment)
-        .select('lr.*', 'u.name as user_name');
-
-    res.status(200).json({ success: true, data: leaveRequests });
-});
-
+  const userDepartment = req.user.department
+  const leaveRequests = await db("leave_requests as lr")
+    .join("users as u", "lr.user_id", "u.id")
+    .where("u.department", userDepartment)
+    .select("lr.*", "u.name as user_name")
+  res.status(200).json({ success: true, data: leaveRequests })
+})
 
 /**
- * @desc    Get leave requests pending approval for the current user
+ * @desc    Get leave requests pending the current user's approval
  * @route   GET /api/leave/pending-approvals
  * @access  Private (Manager/HR/Admin)
  */
 exports.getPendingApprovals = asyncHandler(async (req, res) => {
-    // This logic can be simple (based on department) or complex (multi-level workflow)
-    // For now, managers see all pending requests from their department
-    const userDepartment = req.user.department;
-
-    const pendingRequests = await db('leave_requests as lr')
-        .join('users as u', 'lr.user_id', 'u.id')
-        .where('u.department', userDepartment)
-        .andWhere('lr.status', 'pending')
-        .select('lr.*', 'u.name as user_name');
-    
-    res.status(200).json({ success: true, data: pendingRequests });
-});
-
+  const pendingRequests = await leaveApprovalService.getPendingApprovalsForUser(req.user.id)
+  res.status(200).json({ success: true, count: pendingRequests.length, data: pendingRequests })
+})
 
 /**
  * @desc    Bulk update status of leave requests
@@ -221,17 +253,19 @@ exports.getPendingApprovals = asyncHandler(async (req, res) => {
  * @access  Private (Manager/HR/Admin)
  */
 exports.bulkUpdateLeaveStatus = asyncHandler(async (req, res) => {
-    const { requestIds, status, comments } = req.body;
-    const approverId = req.user.id;
+  const { requestIds, status, comments } = req.body
+  const approverId = req.user.id
 
-    const updated = await db('leave_requests')
-        .whereIn('id', requestIds)
-        .update({
-            status,
-            approval_notes: comments,
-            approved_by: approverId,
-            updated_at: db.fn.now()
-        });
-    
-    res.status(200).json({ success: true, message: `${updated} leave requests updated.`});
-});
+  // Note: This bypasses the approval workflow service for now.
+  // For a full implementation, this should loop and call `processApproval` for each ID.
+  const updated = await db("leave_requests")
+    .whereIn("id", requestIds)
+    .update({
+      status,
+      approval_notes: comments,
+      approved_by: approverId,
+      updated_at: db.fn.now(),
+    })
+
+  res.status(200).json({ success: true, message: `${updated} leave requests updated.` })
+}) 

@@ -53,39 +53,65 @@ exports.createSalaryRecord = asyncHandler(async (req, res) => {
 exports.getSalaryRecords = asyncHandler(async (req, res) => {
   const { userId } = req.query
 
-  // Start building query
-  let query = db("compensation as c")
-    .join("users as u", "c.user_id", "u.id")
-    .leftJoin("users as cb", "c.created_by", "cb.id")
-    .select(
-      "c.id",
-      "c.user_id",
-      "u.name as user_name",
-      "u.email as user_email",
-      "u.department",
-      "u.position",
-      "c.base_salary",
-      "c.meal_allowance",
-      "c.effective_date",
-      "c.notes",
-      "c.created_at",
-      "c.updated_at",
-      "cb.name as created_by_name",
-    )
-    .orderBy("c.effective_date", "desc")
+  try {
+    // Start building query with timeout protection
+    let query = db("compensation as c")
+      .join("users as u", "c.user_id", "u.id")
+      .leftJoin("users as cb", "c.created_by", "cb.id")
+      .select(
+        "c.id",
+        "c.user_id",
+        "u.name as user_name",
+        "u.email as user_email",
+        "u.department",
+        "u.position",
+        "c.base_salary",
+        "c.meal_allowance",
+        "c.effective_date",
+        "c.notes",
+        "c.created_at",
+        "c.updated_at",
+        "cb.name as created_by_name",
+      )
+      .orderBy("c.effective_date", "desc")
+      .timeout(10000) // 10 second timeout
 
-  // Filter by user ID if provided
-  if (userId) {
-    query = query.where("c.user_id", userId)
+    // Filter by user ID if provided
+    if (userId) {
+      query = query.where("c.user_id", userId)
+    }
+
+    // Execute query with additional timeout protection
+    const salaryRecords = await Promise.race([
+      query,
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Compensation query timeout')), 12000)
+      )
+    ]);
+
+    res.status(200).json({
+      success: true,
+      count: salaryRecords.length,
+      data: salaryRecords,
+    })
+
+  } catch (error) {
+    console.error('Error in getSalaryRecords:', error.message);
+    
+    // If timeout or connection error, return cached or minimal data
+    if (error.message.includes('timeout') || error.message.includes('connection')) {
+      console.warn('Database timeout in compensation query, returning minimal response');
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        data: [],
+        message: 'Service temporarily unavailable, please try again'
+      });
+    }
+    
+    // Re-throw other errors
+    throw error;
   }
-
-  const salaryRecords = await query
-
-  res.status(200).json({
-    success: true,
-    count: salaryRecords.length,
-    data: salaryRecords,
-  })
 })
 
 /**

@@ -390,12 +390,26 @@ exports.exportPayrollReport = asyncHandler(async (req, res) => {
   const { periodId } = req.params
   const { department } = req.query
   
-  // Ensure format is properly handled with fallback
-  let format = req.query.format || "pdf"
-  if (typeof format !== 'string') {
-    format = "pdf"
+  // Add debugging for format parameter
+  console.log('🔍 DEBUG: exportPayrollReport - Raw query:', req.query);
+  console.log('🔍 DEBUG: exportPayrollReport - req.query.format:', req.query.format);
+  
+  // Get format from query parameters with explicit validation
+  let format = 'pdf'; // Default to PDF
+  
+  if (req.query.format) {
+    const requestedFormat = String(req.query.format).toLowerCase().trim();
+    console.log('🔍 DEBUG: exportPayrollReport - Requested format (cleaned):', requestedFormat);
+    
+    // Only allow 'pdf' or 'excel' formats
+    if (requestedFormat === 'excel' || requestedFormat === 'pdf') {
+      format = requestedFormat;
+    } else {
+      console.log('🔍 DEBUG: exportPayrollReport - Invalid format requested, defaulting to pdf');
+    }
   }
-  format = format.toLowerCase()
+  
+  console.log('🔍 DEBUG: exportPayrollReport - Final format before passing to generatePayrollReportFile:', format);
 
   if (!periodId) {
     res.status(400)
@@ -410,11 +424,20 @@ exports.exportPayrollReport = asyncHandler(async (req, res) => {
  * @access  Private
  */
 const generatePayrollReportFile = asyncHandler(async (req, res, periodId, department, format) => {
-  // Ensure format is valid
-  if (!format || typeof format !== 'string') {
+  // Add debugging for incoming parameters
+  console.log('🔍 DEBUG: generatePayrollReportFile - Incoming parameters:');
+  console.log('🔍 DEBUG: - periodId:', periodId);
+  console.log('🔍 DEBUG: - department:', department);
+  console.log('🔍 DEBUG: - format (raw):', format);
+  console.log('🔍 DEBUG: - format type:', typeof format);
+  
+  // Ensure format is valid - only default to pdf if format is truly invalid
+  if (!format || typeof format !== 'string' || format.trim() === '') {
+    console.log('🔍 DEBUG: Format was invalid, defaulting to pdf. Original format:', format);
     format = 'pdf'
+  } else {
+    format = format.toLowerCase().trim()
   }
-  format = format.toLowerCase()
   
   // Add debugging
   console.log('🔍 DEBUG: generatePayrollReportFile called with format:', format)

@@ -28,27 +28,73 @@ const apiLimiter = rateLimit({
 const app = express()
 
 // --- Centralized CORS Configuration ---
-const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [];
+// For Vercel deployment, we need to handle CORS more explicitly
+const getAllowedOrigins = () => {
+  const origins = process.env.ALLOWED_ORIGINS;
+  console.log('Raw ALLOWED_ORIGINS env var:', origins);
+  
+  // Check if origins is undefined, null, empty, or contains template syntax
+  if (!origins || origins.trim() === '' || origins.includes('${') || origins === 'undefined') {
+    console.log('No valid ALLOWED_ORIGINS found, using defaults');
+    // Default allowed origins for production - hardcoded for now
+    return [
+      'https://hris-jet.vercel.app',
+      'https://absen-iota.vercel.app',
+      'http://localhost:3000', // for local development
+      'http://127.0.0.1:3000'   // for local development
+    ];
+  }
+  
+  const parsedOrigins = origins.split(',').map(origin => origin.trim());
+  console.log('Parsed allowed origins:', parsedOrigins);
+  return parsedOrigins;
+};
+
+const allowedOrigins = getAllowedOrigins();
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+    console.log('CORS request from origin:', origin);
+    console.log('NODE_ENV:', process.env.NODE_ENV);
+    console.log('VERCEL:', process.env.VERCEL);
     
-    // Allow all origins in development
-    if (process.env.NODE_ENV === 'development') {
-        return callback(null, true);
+    const allowedOrigins = getAllowedOrigins();
+    console.log('Allowed origins:', allowedOrigins);
+    
+    // Allow requests with no origin (like mobile apps, curl requests, or same-origin)
+    if (!origin) {
+      console.log('No origin header, allowing request');
+      return callback(null, true);
     }
     
-    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
-      callback(null, true)
+    // Allow all origins in development or if VERCEL environment is detected and ALLOWED_ORIGINS is not properly set
+    if (process.env.NODE_ENV === 'development' || 
+        (process.env.VERCEL && (!process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS.includes('${')))) {
+      console.log('Development mode or Vercel env issue detected, allowing all origins');
+      return callback(null, true);
+    }
+    
+    // Check if origin is in allowed list or if we allow all origins
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      console.log('Origin allowed:', origin);
+      callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'))
+      console.log('Origin not allowed:', origin);
+      console.log('Available origins:', allowedOrigins);
+      callback(new Error(`CORS: Origin ${origin} not allowed`));
     }
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  allowedHeaders: [
+    "Content-Type", 
+    "Authorization", 
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+    "Access-Control-Request-Method",
+    "Access-Control-Request-Headers"
+  ],
   optionsSuccessStatus: 200 // For legacy browser support
 }
 
@@ -108,6 +154,10 @@ app.get("/health", async (_req, res) => {
       message: dbConnected ? "Server is running with database connection" : "Server is running but database connection failed",
       environment: process.env.NODE_ENV,
       timestamp: new Date().toISOString(),
+      cors: {
+        allowedOrigins: getAllowedOrigins(),
+        rawAllowedOrigins: process.env.ALLOWED_ORIGINS
+      },
       database: {
         connected: dbConnected,
         host: process.env.DB_HOST,

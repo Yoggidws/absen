@@ -38,10 +38,12 @@ const getAllowedOrigins = () => {
     console.log('No valid ALLOWED_ORIGINS found, using defaults');
     // Default allowed origins for production - hardcoded for now
     return [
-      'https://hris-jet.vercel.app',
-      'https://absen-iota.vercel.app',
-      'http://localhost:3000', // for local development
-      'http://127.0.0.1:3000'   // for local development
+      'https://hris-jet.vercel.app',     // Correct frontend URL from error message
+      'https://hrsyst.vercel.app',       // Alternative frontend URL from logs
+      'https://absen-iota.vercel.app',   // Backend URL
+      'http://localhost:3000',           // for local development
+      'http://127.0.0.1:3000',           // for local development
+      '*'                                // wildcard for now
     ];
   }
   
@@ -53,7 +55,7 @@ const getAllowedOrigins = () => {
 const allowedOrigins = getAllowedOrigins();
 
 const corsOptions = {
-  origin: true, // Allow all origins for now to fix the immediate issue
+  origin: true, // Allow all origins since we handle this in serverless handler
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
   allowedHeaders: [
@@ -65,13 +67,13 @@ const corsOptions = {
     "Access-Control-Request-Method",
     "Access-Control-Request-Headers"
   ],
-  optionsSuccessStatus: 200 // For legacy browser support
+  optionsSuccessStatus: 200
 }
 
 // Enable pre-flight across-the-board
 app.options('*', cors(corsOptions))
 
-// Apply main CORS middleware
+// Apply main CORS middleware (simplified for serverless)
 app.use(cors(corsOptions));
 // --- End of CORS Configuration ---
 
@@ -80,43 +82,27 @@ app.use(cors(corsOptions));
 app.use(helmet()) // Add security headers
 app.use("/api", apiLimiter) // Apply rate limiting to API routes
 
-// Add explicit CORS headers middleware as a backup
+// Simplified CORS middleware for Express app (backup only)
 app.use((req, res, next) => {
-  const allowedOrigins = getAllowedOrigins();
-  const origin = req.headers.origin;
-  
-  console.log('Setting explicit CORS headers for request:', req.method, req.url);
-  console.log('Request origin:', origin);
-  console.log('Allowed origins:', allowedOrigins);
-  
-  // Check if wildcard is in allowed origins
-  const hasWildcard = allowedOrigins.includes('*');
-  console.log('Has wildcard permission:', hasWildcard);
-  
-  // Set CORS headers based on configuration
-  if (hasWildcard) {
-    console.log('Setting wildcard CORS header due to * in ALLOWED_ORIGINS');
-    res.header('Access-Control-Allow-Origin', origin || '*');
-  } else if (process.env.VERCEL || process.env.NODE_ENV === 'development' || 
-             !process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS.includes('${')) {
-    console.log('Setting permissive CORS headers for Vercel/dev environment');
-    res.header('Access-Control-Allow-Origin', origin || '*');
-  } else if (origin && allowedOrigins.includes(origin)) {
-    console.log('Setting CORS header for specific allowed origin:', origin);
-    res.header('Access-Control-Allow-Origin', origin);
-  } else {
-    console.log('Setting fallback CORS headers');
-    res.header('Access-Control-Allow-Origin', 'https://hris-jet.vercel.app');
+  // Only set headers if not already set by serverless handler
+  if (!res.getHeader('Access-Control-Allow-Origin')) {
+    const origin = req.headers.origin;
+    console.log('Express middleware setting CORS for origin:', origin);
+    
+    if (origin) {
+      res.header('Access-Control-Allow-Origin', origin);
+    } else {
+      res.header('Access-Control-Allow-Origin', '*');
+    }
+    
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Request-Method, Access-Control-Request-Headers');
   }
-  
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Request-Method, Access-Control-Request-Headers');
-  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
   
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    console.log('Handling OPTIONS preflight request');
+    console.log('Express middleware handling OPTIONS');
     res.status(200).end();
     return;
   }
@@ -155,6 +141,28 @@ app.use("/api/master-data", require("../routes/masterDataRoutes"))
 app.get("/test", (_req, res) => {
   res.status(200).json({ status: "ok", message: "Test endpoint working" })
 })
+
+app.get("/cors-test", (req, res) => {
+  console.log('CORS test endpoint called');
+  console.log('Request origin:', req.headers.origin);
+  console.log('Current response headers:', {
+    'Access-Control-Allow-Origin': res.getHeader('Access-Control-Allow-Origin'),
+    'Access-Control-Allow-Credentials': res.getHeader('Access-Control-Allow-Credentials'),
+    'Access-Control-Allow-Methods': res.getHeader('Access-Control-Allow-Methods')
+  });
+  
+  res.status(200).json({ 
+    status: "ok", 
+    message: "CORS test endpoint working",
+    origin: req.headers.origin,
+    corsHeaders: {
+      'Access-Control-Allow-Origin': res.getHeader('Access-Control-Allow-Origin'),
+      'Access-Control-Allow-Credentials': res.getHeader('Access-Control-Allow-Credentials'),
+      'Access-Control-Allow-Methods': res.getHeader('Access-Control-Allow-Methods')
+    }
+  })
+})
+
 app.get("/health", async (_req, res) => {
   try {
     // Test database connection
@@ -232,42 +240,57 @@ app.use(errorHandler)
 
 // The serverless handler with improved CORS handling
 const handleServerless = (req, res) => {
-  console.log('Serverless handler called for:', req.method, req.url);
-  console.log('Request headers:', JSON.stringify(req.headers, null, 2));
+  console.log('=== SERVERLESS HANDLER START ===');
+  console.log('Method:', req.method);
+  console.log('URL:', req.url);
+  console.log('Origin header:', req.headers.origin);
+  console.log('User-Agent:', req.headers['user-agent']);
+  console.log('All headers:', JSON.stringify(req.headers, null, 2));
   
-  // Ensure CORS headers are set for serverless environment
+  // SET CORS HEADERS IMMEDIATELY - BEFORE ANYTHING ELSE
   const origin = req.headers.origin;
-  const allowedOrigins = getAllowedOrigins();
-  const hasWildcard = allowedOrigins.includes('*');
+  console.log('Processing origin:', origin);
+  console.log('Environment variables:');
+  console.log('- NODE_ENV:', process.env.NODE_ENV);
+  console.log('- VERCEL:', process.env.VERCEL);
+  console.log('- ALLOWED_ORIGINS:', process.env.ALLOWED_ORIGINS);
   
-  console.log('Serverless request origin:', origin);
-  console.log('Serverless allowed origins:', allowedOrigins);
-  console.log('Serverless has wildcard:', hasWildcard);
+  // Always set permissive CORS headers for Vercel environment
+  const allowOrigin = origin || 'https://hris-jet.vercel.app';
+  console.log('Setting Access-Control-Allow-Origin to:', allowOrigin);
   
-  // Set CORS headers directly for Vercel
-  if (hasWildcard) {
-    console.log('Setting wildcard CORS in serverless handler');
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  } else if (origin && (origin.includes('hris-jet.vercel.app') || origin.includes('absen-iota.vercel.app') || origin.includes('localhost'))) {
-    console.log('Setting specific origin CORS in serverless handler:', origin);
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    console.log('Setting fallback CORS in serverless handler');
-    res.setHeader('Access-Control-Allow-Origin', 'https://hris-jet.vercel.app');
-  }
-  
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Request-Method, Access-Control-Request-Headers');
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Request-Method, Access-Control-Request-Headers, Cache-Control, Pragma');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
+  res.setHeader('Vary', 'Origin');
+  
+  // Verify headers were set
+  const setHeaders = {
+    'Access-Control-Allow-Origin': res.getHeader('Access-Control-Allow-Origin'),
+    'Access-Control-Allow-Credentials': res.getHeader('Access-Control-Allow-Credentials'),
+    'Access-Control-Allow-Methods': res.getHeader('Access-Control-Allow-Methods'),
+    'Access-Control-Allow-Headers': res.getHeader('Access-Control-Allow-Headers')
+  };
+  console.log('CORS headers set successfully:', setHeaders);
   
   // Handle preflight OPTIONS requests immediately
   if (req.method === 'OPTIONS') {
-    console.log('Handling OPTIONS in serverless handler');
-    res.status(200).end();
+    console.log('=== HANDLING OPTIONS PREFLIGHT ===');
+    console.log('Responding with 200 OK and ending request');
+    res.status(200);
+    res.end();
     return;
   }
   
-  return app(req, res);
+  console.log('=== PASSING TO EXPRESS APP ===');
+  try {
+    return app(req, res);
+  } catch (error) {
+    console.error('Error in Express app:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 };
 
 // Export for serverless environments (Vercel)

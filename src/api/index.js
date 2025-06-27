@@ -89,17 +89,21 @@ app.use((req, res, next) => {
   console.log('Request origin:', origin);
   console.log('Allowed origins:', allowedOrigins);
   
-  // Always set CORS headers for Vercel environment or development
-  if (process.env.VERCEL || process.env.NODE_ENV === 'development' || 
-      !process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS.includes('${')) {
-    console.log('Setting permissive CORS headers');
+  // Check if wildcard is in allowed origins
+  const hasWildcard = allowedOrigins.includes('*');
+  console.log('Has wildcard permission:', hasWildcard);
+  
+  // Set CORS headers based on configuration
+  if (hasWildcard) {
+    console.log('Setting wildcard CORS header due to * in ALLOWED_ORIGINS');
+    res.header('Access-Control-Allow-Origin', origin || '*');
+  } else if (process.env.VERCEL || process.env.NODE_ENV === 'development' || 
+             !process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS.includes('${')) {
+    console.log('Setting permissive CORS headers for Vercel/dev environment');
     res.header('Access-Control-Allow-Origin', origin || '*');
   } else if (origin && allowedOrigins.includes(origin)) {
-    console.log('Setting CORS header for allowed origin:', origin);
+    console.log('Setting CORS header for specific allowed origin:', origin);
     res.header('Access-Control-Allow-Origin', origin);
-  } else if (allowedOrigins.includes('*')) {
-    console.log('Setting wildcard CORS header');
-    res.header('Access-Control-Allow-Origin', '*');
   } else {
     console.log('Setting fallback CORS headers');
     res.header('Access-Control-Allow-Origin', 'https://hris-jet.vercel.app');
@@ -233,12 +237,22 @@ const handleServerless = (req, res) => {
   
   // Ensure CORS headers are set for serverless environment
   const origin = req.headers.origin;
+  const allowedOrigins = getAllowedOrigins();
+  const hasWildcard = allowedOrigins.includes('*');
+  
   console.log('Serverless request origin:', origin);
+  console.log('Serverless allowed origins:', allowedOrigins);
+  console.log('Serverless has wildcard:', hasWildcard);
   
   // Set CORS headers directly for Vercel
-  if (origin && (origin.includes('hris-jet.vercel.app') || origin.includes('absen-iota.vercel.app') || origin.includes('localhost'))) {
+  if (hasWildcard) {
+    console.log('Setting wildcard CORS in serverless handler');
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  } else if (origin && (origin.includes('hris-jet.vercel.app') || origin.includes('absen-iota.vercel.app') || origin.includes('localhost'))) {
+    console.log('Setting specific origin CORS in serverless handler:', origin);
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else {
+    console.log('Setting fallback CORS in serverless handler');
     res.setHeader('Access-Control-Allow-Origin', 'https://hris-jet.vercel.app');
   }
   

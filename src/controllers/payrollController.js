@@ -104,11 +104,60 @@ exports.runPayroll = asyncHandler(async (req, res) => {
  */
 exports.getPayrollItems = asyncHandler(async (req, res) => {
     const { periodId } = req.params;
+
+    // Get the payroll period
+    const period = await db('payroll_periods').where({ id: periodId }).first();
+    if (!period) {
+        res.status(404);
+        throw new Error('Payroll period not found');
+    }
+
+    // Get the payroll items with user details
     const items = await db('payroll_items as pi')
         .join('users as u', 'pi.user_id', 'u.id')
         .where({ payroll_period_id: periodId })
-        .select('pi.*', 'u.name as user_name');
-    res.status(200).json({ success: true, count: items.length, data: items });
+        .select(
+            'pi.*',
+            'u.name as employee_name',
+            'u.id as employee_id',
+            'u.email',
+            'u.department',
+            'u.position'
+        );
+
+    // Calculate totals
+    const totals = items.reduce((acc, item) => ({
+        total_employees: acc.total_employees + 1,
+        total_base_salary: acc.total_base_salary + parseFloat(item.base_salary),
+        total_bonuses: acc.total_bonuses + parseFloat(item.bonuses),
+        total_deductions: acc.total_deductions + parseFloat(item.deductions),
+        total_absence_deduction: acc.total_absence_deduction + parseFloat(item.absence_deduction),
+        total_gross_salary: acc.total_gross_salary + parseFloat(item.gross_salary),
+        total_net_salary: acc.total_net_salary + parseFloat(item.net_salary),
+        total_working_days: acc.total_working_days + parseInt(item.working_days),
+        total_present_days: acc.total_present_days + parseInt(item.present_days),
+        total_absent_days: acc.total_absent_days + parseInt(item.absent_days)
+    }), {
+        total_employees: 0,
+        total_base_salary: 0,
+        total_bonuses: 0,
+        total_deductions: 0,
+        total_absence_deduction: 0,
+        total_gross_salary: 0,
+        total_net_salary: 0,
+        total_working_days: 0,
+        total_present_days: 0,
+        total_absent_days: 0
+    });
+
+    res.status(200).json({
+        success: true,
+        data: {
+            payroll_period: period,
+            items,
+            totals
+        }
+    });
 });
 
 /**
@@ -294,6 +343,123 @@ exports.updatePayrollPeriodStatus = asyncHandler(async(req, res) => {
 
 exports.sendPayslipsByEmail = asyncHandler(async(req, res) => {
     res.status(501).json({success: false, message: "Emailing payslips is not implemented yet."})
+})
+
+/**
+ * @desc    Generate payroll with meal allowance adjustments
+ * @route   POST /api/payroll/calculate-with-allowance
+ * @access  Private/Admin
+ */
+exports.calculatePayrollWithAllowance = asyncHandler(async (req, res) => {
+  const { period, generate } = req.query
+
+  if (!period) {
+    res.status(400)
+    throw new Error("Period is required (format: YYYY-MM)")
+  }
+
+  // Parse period
+  const [year, month] = period.split('-')
+  const startDate = new Date(parseInt(year), parseInt(month) - 1, 1)
+  const endDate = new Date(parseInt(year), parseInt(month), 0)
+
+  // Calculate total working days
+  const totalWorkingDays = getWorkingDaysInPeriod(startDate, endDate)
+
+  // Get all active employees with their compensation data
+  const users = await db('users as u')
+    .join('employees as e', 'u.id', 'e.user_id')
+    .leftJoin('compensation as c', 'u.id', 'c.user_id')
+    .where('u.active', true)
+    .select(
+      'u.id as user_id',
+      'u.name',
+      'u.email',
+      'u.department',
+      'u.position',
+      'u.role',
+      'e.basic_salary',
+      'e.allowance',
+      'c.base_salary as comp_base_salary',
+      'c.meal_allowance as comp_meal_allowance'
+    )
+
+  const payrollData = []
+
+  for (const user of users) {
+    // Count actual attendance days
+    const attendanceResult = await db('attendance')
+      .where('user_id', user.user_id)
+      .where('type', 'check-in')
+      .whereBetween('timestamp', [startDate, endDate])
+      .count('* as count')
+      .first()
+    
+    const daysWorked = parseInt(attendanceResult.count) || 0
+    const absenceDays = totalWorkingDays - daysWorked
+    
+    // Use compensation data if available, otherwise use employee data
+    const baseSalary = user.comp_base_salary || user.basic_salary || 0
+    const mealAllowancePerDay = user.comp_meal_allowance || user.allowance || 0
+    
+    // Calculate meal allowance based on actual attendance
+    // Only get meal allowance for days actually worked
+    const mealAllowanceTotal = daysWorked * mealAllowancePerDay
+    
+    // Calculate gross salary (base salary + meal allowance)
+    const grossSalary = baseSalary + mealAllowanceTotal
+    
+    // Calculate deductions (example: 5% tax, 2% insurance)
+    const taxDeduction = grossSalary * 0.05
+    const insuranceDeduction = grossSalary * 0.02
+    const totalDeductions = taxDeduction + insuranceDeduction
+    
+    // Calculate net salary
+    const netSalary = grossSalary - totalDeductions
+
+    const payrollItem = {
+      user_id: user.user_id,
+      name: user.name,
+      email: user.email,
+      department: user.department,
+      position: user.position,
+      role: user.role,
+      base_salary: baseSalary,
+      meal_allowance_per_day: mealAllowancePerDay,
+      total_working_days: totalWorkingDays,
+      days_worked: daysWorked,
+      absence_days: absenceDays,
+      meal_allowance_total: mealAllowanceTotal,
+      gross_salary: grossSalary,
+      tax_deduction: taxDeduction,
+      insurance_deduction: insuranceDeduction,
+      total_deductions: totalDeductions,
+      net_salary: netSalary,
+      currency: 'IDR',
+      period: period
+    }
+    
+    payrollData.push(payrollItem)
+  }
+
+  // Generate Excel if requested
+  if (generate === 'excel') {
+    return await generatePayrollExcel(payrollData, period, res)
+  }
+  
+  // Generate PDF if requested  
+  if (generate === 'pdf') {
+    return await generatePayrollPDF(payrollData, period, res)
+  }
+
+  // Return JSON data
+  res.status(200).json({
+    success: true,
+    period: period,
+    total_working_days: totalWorkingDays,
+    count: payrollData.length,
+    data: payrollData
+  })
 })
 
 /**

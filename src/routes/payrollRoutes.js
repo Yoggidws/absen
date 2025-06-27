@@ -23,6 +23,7 @@ const {
   // --- New attendance-based payroll ---
   generateAttendanceBasedPayroll,
   generateIndividualPayslip,
+  calculatePayrollWithAllowance,
 } = require("../controllers/payrollController")
 const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
 const { rbac } = require("../middlewares/rbacMiddleware")
@@ -65,6 +66,11 @@ router
 router
   .route("/attendance-payroll")
   .get(enhancedProtect, rbac.can("read:payroll:all"), generateAttendanceBasedPayroll)
+
+// Calculate payroll with meal allowance adjustments
+router
+  .route("/calculate-with-allowance")
+  .post(enhancedProtect, rbac.can("manage:payroll"), calculatePayrollWithAllowance)
 
 // Manage payroll periods
 router

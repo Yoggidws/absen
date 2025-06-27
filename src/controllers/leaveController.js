@@ -206,8 +206,73 @@ exports.cancelLeaveRequest = asyncHandler(async (req, res) => {
  * @access  Private
  */
 exports.getLeaveBalance = asyncHandler(async (req, res) => {
-  const balance = await employeeLeaveBalanceService.getEmployeeLeaveBalance(req.user.id)
-  res.status(200).json({ success: true, data: balance })
+  const userId = req.user.id
+  const { year } = req.query
+  const targetYear = year ? parseInt(year) : new Date().getFullYear()
+
+  try {
+    const leaveBalance = await employeeLeaveBalanceService.getEmployeeLeaveBalance(userId, targetYear)
+
+    // Calculate usage from leave requests
+    const approvedLeaves = await db("leave_requests")
+      .where({ 
+        user_id: userId, 
+        status: "approved" 
+      })
+      .whereRaw("EXTRACT(YEAR FROM start_date) = ? OR EXTRACT(YEAR FROM end_date) = ?", [targetYear, targetYear])
+
+    const usage = {}
+    const leaveTypeMap = {
+      "annual": "annual_leave", 
+      "sick": "sick_leave", 
+      "long": "long_leave",
+      "maternity": "maternity_leave", 
+      "paternity": "paternity_leave",
+      "marriage": "marriage_leave", 
+      "death": "death_leave", 
+      "hajj_umrah": "hajj_umrah_leave"
+    }
+
+    // Initialize usage counters
+    Object.values(leaveTypeMap).forEach(field => {
+      usage[field] = 0
+    })
+
+    // Calculate used days
+    approvedLeaves.forEach(leave => {
+      const startDate = new Date(leave.start_date)
+      const endDate = new Date(leave.end_date)
+      const diffTime = Math.abs(endDate - startDate)
+      const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1
+
+      const balanceField = leaveTypeMap[leave.type]
+      if (balanceField) {
+        usage[balanceField] += days
+      }
+    })
+
+    const detailedBalance = {}
+    Object.keys(leaveTypeMap).forEach(key => {
+        const field = leaveTypeMap[key]
+        detailedBalance[field] = {
+            entitled: leaveBalance[field] || 0,
+            used: usage[field] || 0,
+            remaining: Math.max(0, (leaveBalance[field] || 0) - (usage[field] || 0))
+        }
+    })
+
+    const response = {
+      id: leaveBalance.id,
+      user_id: leaveBalance.user_id,
+      year: leaveBalance.year,
+      leave_balance: detailedBalance
+    }
+    
+    res.status(200).json({ success: true, data: response })
+  } catch (error) {
+    console.error(`Error fetching leave balance for user ${userId}:`, error)
+    res.status(500).json({ success: false, message: "Failed to retrieve leave balance.", error: error.message })
+  }
 })
 
 /**

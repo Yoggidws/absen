@@ -28,14 +28,14 @@ class LeaveApprovalService {
       const operation = async (transaction) => {
         console.log(`Initializing workflow for request ${leaveRequestId} by user ${requesterId}`)
         const requester = await this._getUserDetails(requesterId, transaction)
-        let nextApprover = null
-        let approverRole = null
         let approvalLevel = 1
         let leaveRequestStatusUpdate = { status: "pending", current_approval_level: approvalLevel }
 
         if (requester.is_owner || (requester.role === 'admin' && await this._isUserTheOnlyOwnerOrAdmin(requesterId, transaction))) {
           console.log(`Requester ${requesterId} is owner/sole admin. Auto-approving.`)
           leaveRequestStatusUpdate = { status: "approved", approved_by: requester.id, current_approval_level: approvalLevel }
+          
+          // Create auto-approval workflow entry
           await transaction("leave_approval_workflow").insert({
             id: generateLeaveId("LAW"),
             leave_request_id: leaveRequestId,
@@ -46,11 +46,20 @@ class LeaveApprovalService {
             comments: "Auto-approved as owner/sole admin.",
             approved_at: new Date(),
           })
+          
+          // Update leave request status first
+          await transaction("leave_requests")
+            .where({ id: leaveRequestId })
+            .update(leaveRequestStatusUpdate)
+          
+          // Then update balance and notify
           await this.updateLeaveBalance(leaveRequestId, transaction, requester.id)
           await this.notifyEmployee(leaveRequestId, 'approved', requester.id, approvalLevel, transaction)
         } else {
+          // Regular approval workflow
           const departmentManager = await this._findDepartmentManager(requester.department, transaction)
           if (departmentManager && departmentManager.id !== requesterId) {
+            // Department manager approval
             await transaction("leave_approval_workflow").insert({
               id: generateLeaveId("LAW"),
               leave_request_id: leaveRequestId,
@@ -61,6 +70,7 @@ class LeaveApprovalService {
               comments: null,
             })
           } else {
+            // Skip to HR manager level
             approvalLevel = 2
             leaveRequestStatusUpdate.current_approval_level = approvalLevel
             const hrManager = await this._findHRManager(transaction)
@@ -75,6 +85,7 @@ class LeaveApprovalService {
                 comments: null,
               })
             } else {
+              // Skip to owner level
               approvalLevel = 3
               leaveRequestStatusUpdate.current_approval_level = approvalLevel
               const owner = await this._findOwner(transaction)
@@ -97,11 +108,12 @@ class LeaveApprovalService {
               }
             }
           }
+          
+          // Update leave request status for non-auto-approved requests
+          await transaction("leave_requests")
+            .where({ id: leaveRequestId })
+            .update(leaveRequestStatusUpdate)
         }
-
-        await transaction("leave_requests")
-          .where({ id: leaveRequestId })
-          .update(leaveRequestStatusUpdate)
 
         return leaveRequestStatusUpdate
       }
@@ -143,6 +155,8 @@ class LeaveApprovalService {
     try {
       const operation = async (transaction) => {
         console.log(`Processing approval for ${leaveRequestId}, level ${approvalLevel} by ${actingUserId}, decision: ${decision}`)
+        
+        // Find the specific workflow entry for this user and level
         const workflowEntry = await transaction("leave_approval_workflow")
           .where({
             leave_request_id: leaveRequestId,
@@ -158,6 +172,7 @@ class LeaveApprovalService {
           )
         }
 
+        // Update the workflow entry
         await transaction("leave_approval_workflow")
           .where({ id: workflowEntry.id })
           .update({
@@ -167,23 +182,51 @@ class LeaveApprovalService {
           })
         
         let finalStatus = decision
+        let updateData = {
+          approved_by: actingUserId,
+          approval_notes: comments || workflowEntry.comments,
+          updated_at: new Date(),
+        }
+
+        // If rejected, set final status
+        if (decision === "rejected") {
+          finalStatus = "rejected"
+          updateData.status = finalStatus
+        } else if (decision === "approved") {
+          // Check if there are more approval levels needed
+          const nextWorkflowEntry = await transaction("leave_approval_workflow")
+            .where({
+              leave_request_id: leaveRequestId,
+              approval_level: approvalLevel + 1,
+              status: "pending"
+            })
+            .first()
+
+          if (nextWorkflowEntry) {
+            // More approvals needed - keep status as pending but update current approval level
+            finalStatus = "pending"
+            updateData.status = finalStatus
+            updateData.current_approval_level = approvalLevel + 1
+          } else {
+            // Final approval - set to approved
+            finalStatus = "approved"
+            updateData.status = finalStatus
+          }
+        }
         
+        // Update the leave request
         await transaction("leave_requests")
           .where({ id: leaveRequestId })
-          .update({
-            status: finalStatus,
-            approved_by: actingUserId,
-            approval_notes: comments || workflowEntry.comments,
-            updated_at: new Date(),
-          })
+          .update(updateData)
         
         console.log(`Leave request ${leaveRequestId} status updated to ${finalStatus} by ${actingUserId}`)
 
+        // Update balance and notify only if finally approved
         if (finalStatus === "approved") {
           await this.updateLeaveBalance(leaveRequestId, transaction, actingUserId)
         }
 
-        await this.notifyEmployee(leaveRequestId, decision, actingUserId, approvalLevel, transaction)
+        await this.notifyEmployee(leaveRequestId, finalStatus, actingUserId, approvalLevel, transaction)
         
         const updatedLeaveRequest = await transaction("leave_requests").where({id: leaveRequestId}).first()
         const approvalWorkflowHistory = await this.getApprovalWorkflow(leaveRequestId, transaction)
@@ -204,12 +247,20 @@ class LeaveApprovalService {
    */
   async updateLeaveBalance(leaveRequestId, trx = null, actingUserId = null) {
     const queryRunner = trx || db
+    
+    // Get the leave request - don't filter by status since it might not be updated yet in the transaction
     const leaveRequest = await queryRunner("leave_requests")
-      .where({ id: leaveRequestId, status: "approved" })
+      .where({ id: leaveRequestId })
       .first()
 
     if (!leaveRequest) {
-      console.log(`Leave request ${leaveRequestId} not found or not approved for balance update.`)
+      console.log(`Leave request ${leaveRequestId} not found for balance update.`)
+      return
+    }
+
+    // Check if the request is approved or being approved
+    if (leaveRequest.status !== "approved") {
+      console.log(`Leave request ${leaveRequestId} is not approved (status: ${leaveRequest.status}), skipping balance update.`)
       return
     }
 
@@ -235,26 +286,34 @@ class LeaveApprovalService {
         return
       }
 
-      const newBalanceValue = leaveBalance[fieldToUpdate] - requestedDays
+      const currentBalance = leaveBalance[fieldToUpdate]
+      const newBalanceValue = Math.max(0, currentBalance - requestedDays) // Ensure balance doesn't go negative
 
+      // Update the balance
       await queryRunner("leave_balance")
         .where({ id: leaveBalance.id })
-        .update({ [fieldToUpdate]: newBalanceValue })
+        .update({ 
+          [fieldToUpdate]: newBalanceValue,
+          updated_at: new Date()
+        })
 
+      // Create audit record
       await queryRunner("leave_balance_audit").insert({
         id: generateLeaveId("LBA"),
         leave_balance_id: leaveBalance.id,
-        adjusted_by: actingUserId,
+        adjusted_by: actingUserId || leaveRequest.user_id,
         adjustment_type: `approved_${leaveRequest.type}`,
         adjustment_amount: -requestedDays,
-        previous_value: leaveBalance[fieldToUpdate],
+        previous_value: currentBalance,
         new_value: newBalanceValue,
         notes: `Leave request ${leaveRequestId} approved. Type: ${leaveRequest.type}, Days: ${requestedDays}`,
       })
-      console.log(`Leave balance updated for user ${leaveRequest.user_id} due to request ${leaveRequestId}.`)
+      
+      console.log(`Leave balance updated for user ${leaveRequest.user_id} due to request ${leaveRequestId}. ${fieldToUpdate}: ${currentBalance} -> ${newBalanceValue}`)
     } catch (error) {
       console.error(`Failed to update leave balance for request ${leaveRequestId}:`, error)
-      throw error
+      // Don't throw error to avoid breaking the approval flow
+      console.log(`Balance update failed but approval will continue for request ${leaveRequestId}`)
     }
   }
 

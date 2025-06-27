@@ -12,48 +12,25 @@ class EmployeeLeaveBalanceService {
    * This determines leave entitlements based on employment details
    */
   getLeaveEntitlements(employee) {
-    const baseEntitlements = {
-      annual_leave: 20,
-      sick_leave: 10,
-      other_leave: 5,
-      long_leave: 90,
-      maternity_leave: 90,
-      paternity_leave: 14,
-      marriage_leave: 3,
-      death_leave: 2,
-      hajj_umrah_leave: 30
+    // All leave balances are now managed manually by HR/admin.
+    // New employees will start with zero balances.
+    const entitlements = {
+      annual_leave: 0,
+      sick_leave: 0,
+      other_leave: 0,
+      long_leave: 0,
+      maternity_leave: 0,
+      paternity_leave: 0,
+      marriage_leave: 0,
+      death_leave: 0,
+      hajj_umrah_leave: 0
     }
 
-    // Adjust entitlements based on employee characteristics
-    const adjustments = { ...baseEntitlements }
+    // The previous logic for automatically granting leave based on
+    // employee data is removed to allow for manual management.
+    // Admins can use the "Adjust Leave Balance" feature to grant specific entitlements.
 
-    // Employment status adjustments
-    if (employee.employment_status === 'contract') {
-      adjustments.annual_leave = 15
-      adjustments.sick_leave = 8
-    } else if (employee.employment_status === 'probation') {
-      adjustments.annual_leave = 10
-      adjustments.sick_leave = 5
-    } else if (employee.employment_status === 'intern') {
-      adjustments.annual_leave = 5
-      adjustments.sick_leave = 3
-      adjustments.long_leave = 0
-      adjustments.maternity_leave = 0
-      adjustments.paternity_leave = 0
-    }
-
-    // Years of service adjustments
-    if (employee.hire_date) {
-      const yearsOfService = this.calculateYearsOfService(employee.hire_date)
-      if (yearsOfService >= 5) {
-        adjustments.annual_leave += 5 // Bonus for long-term employees
-      }
-      if (yearsOfService >= 10) {
-        adjustments.annual_leave += 5 // Additional bonus
-      }
-    }
-
-    return adjustments
+    return entitlements
   }
 
   /**
@@ -117,8 +94,8 @@ class EmployeeLeaveBalanceService {
       adjusted_by: 'system',
       adjustment_type: "employee_system_initialization",
       adjustment_amount: 0,
-      previous_value: JSON.stringify({}),
-      new_value: JSON.stringify(entitlements),
+      previous_value: 0,
+      new_value: 0,
       notes: `Leave balance initialized from employee system. Employment status: ${employee.employment_status}, Years of service: ${this.calculateYearsOfService(employee.hire_date)}`
     })
 
@@ -239,8 +216,8 @@ class EmployeeLeaveBalanceService {
         adjusted_by: 'system',
         adjustment_type: "employee_data_update",
         adjustment_amount: 0,
-        previous_value: JSON.stringify(currentBalance),
-        new_value: JSON.stringify(updatedBalance),
+        previous_value: 0,
+        new_value: 0,
         notes: `Leave balance recalculated due to employee data changes`
       })
 
@@ -281,6 +258,59 @@ class EmployeeLeaveBalanceService {
     const day = now.getDate().toString().padStart(2, "0")
     const timestamp = Date.now().toString().slice(-6)
     return `${prefix}${year}${month}${day}${timestamp}`
+  }
+
+  /**
+   * Manually adjust a leave balance for a specific leave type
+   */
+  async adjustLeaveBalance({ userId, leaveType, adjustmentType, amount, reason, actorId, year = null }) {
+    const targetYear = year || new Date().getFullYear()
+
+    // Ensure leave balance exists for the user and year
+    const leaveBalance = await this.getEmployeeLeaveBalance(userId, targetYear)
+
+    const leaveTypeField = `${leaveType}_leave`
+
+    if (!(leaveTypeField in leaveBalance)) {
+      throw new Error(`Invalid leave type: ${leaveType}`)
+    }
+
+    const previousValue = parseFloat(leaveBalance[leaveTypeField]) || 0
+    let newValue
+
+    if (adjustmentType === 'add') {
+      newValue = previousValue + amount
+    } else if (adjustmentType === 'reduce') {
+      newValue = previousValue - amount
+      if (newValue < 0) {
+        throw new Error("Leave balance cannot be negative")
+      }
+    } else {
+      throw new Error("Invalid adjustment type")
+    }
+
+    // Update the leave balance
+    const [updatedBalance] = await db("leave_balance")
+      .where({ id: leaveBalance.id })
+      .update({
+        [leaveTypeField]: newValue,
+        updated_at: new Date()
+      })
+      .returning("*")
+
+    // Create audit record
+    await db("leave_balance_audit").insert({
+      id: this.generateLeaveId("LBA"),
+      leave_balance_id: leaveBalance.id,
+      adjusted_by: actorId,
+      adjustment_type: `manual_${adjustmentType}`,
+      adjustment_amount: adjustmentType === 'add' ? amount : -amount,
+      previous_value: previousValue,
+      new_value: newValue,
+      notes: reason
+    })
+
+    return updatedBalance
   }
 }
 

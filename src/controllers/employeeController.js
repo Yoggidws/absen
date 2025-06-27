@@ -17,9 +17,12 @@ exports.getAllEmployees = asyncHandler(async (req, res) => {
     .join("users as u", "e.user_id", "u.id")
     .leftJoin("departments as d", "e.department_id", "d.id")
     .select(
-      "e.*",
+      "e.employee_id",
+      "u.id as user_id",
+      "e.full_name",
+      "e.email",
+      "e.department",
       "u.name",
-      "u.email",
       "u.role",
       "u.active",
       "u.created_at as user_created_at",
@@ -75,16 +78,19 @@ exports.getEmployeeById = asyncHandler(async (req, res) => {
     .join("users as u", "e.user_id", "u.id")
     .leftJoin("departments as d", "e.department_id", "d.id")
     .select(
-      "e.*",
+      "e.employee_id",
+      "u.id as user_id",
+      "e.full_name",
+      "e.email",
+      "e.department",
       "u.name",
-      "u.email",
       "u.role",
       "u.active",
       "u.created_at as user_created_at",
       "d.name as department_name"
     )
-    .where("e.employee_id", id)
-    .orWhere("e.user_id", id)
+    .where("e.user_id", id)
+    .orWhere("e.employee_id", id)
     .first()
 
   if (!employee) {
@@ -180,35 +186,22 @@ exports.createEmployee = asyncHandler(async (req, res) => {
       user_id: userId
     })
 
-    // **INTEGRATION POINT**: Create leave balance using Employee System service
-    // This replaces hardcoded balance creation with dynamic calculation based on employee data
-    try {
-      const currentYear = new Date().getFullYear()
-      // Get the employee data we just created to use for balance calculation
-      const employeeData = await trx("employees as e")
-        .join("users as u", "e.user_id", "u.id")
-        .leftJoin("departments as d", "e.department_id", "d.id")
-        .select("e.*", "u.name", "u.email", "u.role", "u.active", "d.name as department_name")
-        .where("e.user_id", userId)
-        .first()
-      
-      if (employeeData) {
-        await employeeLeaveBalanceService.createLeaveBalance(userId, currentYear, employeeData)
-      }
-    } catch (error) {
-      console.error(`Failed to create leave balance for new employee ${userId}:`, error.message)
-      // Don't fail the transaction, just log the error
-      // The balance can be created later using the bulk initialize function
-    }
+    // The automatic creation of a leave balance has been removed.
+    // A leave balance record with zero values will be created automatically 
+    // the first time it's needed (e.g., when an admin views the balance page).
+    // This ensures new users start with no leave data.
   })
 
   const newEmployee = await db("employees as e")
     .join("users as u", "e.user_id", "u.id")
     .leftJoin("departments as d", "e.department_id", "d.id")
     .select(
-      "e.*",
+      "e.employee_id",
+      "u.id as user_id",
+      "e.full_name",
+      "e.email",
+      "e.department",
       "u.name",
-      "u.email",
       "u.role",
       "u.active",
       "d.name as department_name"
@@ -298,9 +291,12 @@ exports.updateEmployee = asyncHandler(async (req, res) => {
     .join("users as u", "e.user_id", "u.id")
     .leftJoin("departments as d", "e.department_id", "d.id")
     .select(
-      "e.*",
+      "e.employee_id",
+      "u.id as user_id",
+      "e.full_name",
+      "e.email",
+      "e.department",
       "u.name",
-      "u.email",
       "u.role",
       "u.active",
       "d.name as department_name"
@@ -341,7 +337,7 @@ exports.deleteEmployee = asyncHandler(async (req, res) => {
 })
 
 /**
- * @desc    Get employees currently in onboarding process
+ * @desc    Get employees in onboarding process
  * @route   GET /api/employees/onboarding
  * @access  Private/Admin/HR
  */
@@ -352,90 +348,33 @@ exports.getOnboardingEmployees = asyncHandler(async (req, res) => {
     throw new Error("Not authorized to view onboarding data")
   }
 
-  try {
-    // Simple fallback: Get employees with probation status or recently hired (basic query)
-    let onboardingEmployees = []
-    
-    try {
-      // Try the complex query first
-      onboardingEmployees = await db("employees as e")
-        .join("users as u", "e.user_id", "u.id")
-        .leftJoin("departments as d", "e.department_id", "d.id")
-        .where("e.employment_status", "probation")
-        .andWhere("u.active", true)
-        .select(
-          "e.employee_id as id",
-          "e.full_name as name",
-          "e.position",
-          "e.department",
-          db.raw("COALESCE(d.name, e.department) as department_name"),
-          "e.hire_date as startDate",
-          "e.employment_status"
-        )
-        .orderBy("e.hire_date", "desc")
-        .limit(20)
-    } catch (queryError) {
-      console.log('Complex query failed, using simple fallback:', queryError.message)
-      // Fallback to simpler query without date intervals
-      onboardingEmployees = await db("employees as e")
-        .join("users as u", "e.user_id", "u.id")
-        .where("e.employment_status", "probation")
-        .andWhere("u.active", true)
-        .select(
-          "e.employee_id as id",
-          "e.full_name as name",
-          "e.position",
-          "e.department as department_name",
-          "e.hire_date as startDate",
-          "e.employment_status"
-        )
-        .orderBy("e.hire_date", "desc")
-        .limit(10)
-    }
+  const onboardingEmployees = await db("employees as e")
+    .join("users as u", "e.user_id", "u.id")
+    .leftJoin("departments as d", "e.department_id", "d.id")
+    .where("e.employment_status", "probation")
+    .andWhere("u.active", true)
+    .select(
+      "e.employee_id",
+      "e.user_id",
+      "e.full_name",
+      "e.email",
+      "e.department",
+      "e.position",
+      "e.employment_status",
+      "e.hire_date",
+      "d.name as department_name"
+    )
+    .orderBy("e.hire_date", "desc")
 
-    // Calculate progress based on days since hire date
-    const enrichedEmployees = onboardingEmployees.map(employee => {
-      const hireDate = new Date(employee.startDate)
-      const now = new Date()
-      const daysSinceHire = Math.floor((now - hireDate) / (1000 * 60 * 60 * 24))
-      
-      // Progress calculation: 90 days = 100% onboarding complete
-      let progress = Math.min(Math.floor((daysSinceHire / 90) * 100), 100)
-      
-      // If employment status is still probation, cap progress at 75%
-      if (employee.employment_status === "probation" && progress > 75) {
-        progress = 75
-      }
-
-      const status = progress >= 90 ? "Completed" : "In Progress"
-
-      return {
-        ...employee,
-        department: employee.department_name || employee.department || 'Unknown',
-        progress,
-        status
-      }
-    })
-
-    res.status(200).json({
-      success: true,
-      count: enrichedEmployees.length,
-      data: enrichedEmployees
-    })
-
-  } catch (error) {
-    console.error('Error in getOnboardingEmployees:', error)
-    // Return empty array as fallback
-    res.status(200).json({
-      success: true,
-      count: 0,
-      data: []
-    })
-  }
+  res.status(200).json({
+    success: true,
+    count: onboardingEmployees.length,
+    data: onboardingEmployees
+  })
 })
 
 /**
- * @desc    Get employees currently in offboarding process
+ * @desc    Get employees in offboarding process
  * @route   GET /api/employees/offboarding
  * @access  Private/Admin/HR
  */
@@ -447,78 +386,42 @@ exports.getOffboardingEmployees = asyncHandler(async (req, res) => {
   }
 
   try {
-    // Simple fallback: Get employees with contract status (as placeholder for offboarding)
-    // Since 'terminated' is not in the enum yet, we'll use contract as a demo
-    let offboardingEmployees = []
-    
-    try {
-      // Try the complex query first - using 'contract' instead of 'terminated'
-      offboardingEmployees = await db("employees as e")
-        .join("users as u", "e.user_id", "u.id")
-        .leftJoin("departments as d", "e.department_id", "d.id")
-        .where("e.employment_status", "contract") // Using contract as demo for offboarding
-        .select(
-          "e.employee_id as id",
-          "e.full_name as name",
-          "e.position",
-          "e.department",
-          db.raw("COALESCE(d.name, e.department) as department_name"),
-          "e.updated_at as lastDay", // Using updated_at as termination date
-          "e.employment_status"
-        )
-        .orderBy("e.updated_at", "desc")
-        .limit(20)
-    } catch (queryError) {
-      console.log('Complex query failed, using simple fallback:', queryError.message)
-      // Fallback to simpler query
-      offboardingEmployees = await db("employees as e")
-        .join("users as u", "e.user_id", "u.id")
-        .where("e.employment_status", "contract")
-        .select(
-          "e.employee_id as id",
-          "e.full_name as name",
-          "e.position",
-          "e.department as department_name",
-          "e.updated_at as lastDay",
-          "e.employment_status"
-        )
-        .orderBy("e.updated_at", "desc")
-        .limit(10)
-    }
-
-    // Calculate progress based on days since termination
-    const enrichedEmployees = offboardingEmployees.map(employee => {
-      const terminationDate = new Date(employee.lastDay)
-      const now = new Date()
-      const daysSinceTermination = Math.floor((now - terminationDate) / (1000 * 60 * 60 * 24))
-      
-      // Progress calculation: 14 days = 100% offboarding complete
-      let progress = Math.min(Math.floor((daysSinceTermination / 14) * 100), 100)
-
-      const status = progress >= 100 ? "Completed" : "In Progress"
-
-      return {
-        ...employee,
-        department: employee.department_name || employee.department || 'Unknown',
-        progress,
-        status
-      }
-    })
+    const offboardingEmployees = await db("employees as e")
+      .join("users as u", "e.user_id", "u.id")
+      .leftJoin("departments as d", "e.department_id", "d.id")
+      .where(function() {
+        this.where("u.active", false).orWhere("e.employment_status", "terminated")
+      })
+      .select(
+        "e.employee_id",
+        "e.user_id",
+        "e.full_name",
+        "e.email",
+        "e.department",
+        "e.position",
+        "e.employment_status",
+        "e.hire_date",
+        "e.termination_date",
+        "e.termination_reason",
+        "d.name as department_name"
+      )
+      .orderBy("e.termination_date", "desc")
+      .orderBy("e.updated_at", "desc")
 
     res.status(200).json({
       success: true,
-      count: enrichedEmployees.length,
-      data: enrichedEmployees
+      count: offboardingEmployees.length,
+      data: offboardingEmployees.map(emp => ({
+        ...emp,
+        termination_date: emp.termination_date || null,
+        termination_reason: emp.termination_reason || null
+      }))
     })
 
   } catch (error) {
-    console.error('Error in getOffboardingEmployees:', error)
-    // Return empty array as fallback
-    res.status(200).json({
-      success: true,
-      count: 0,
-      data: []
-    })
+    console.error("Error in getOffboardingEmployees:", error)
+    res.status(500)
+    throw new Error(`Failed to get offboarding employees: ${error.message}`)
   }
 })
 
@@ -763,7 +666,7 @@ exports.getAllEmployeesLeaveBalances = asyncHandler(async (req, res) => {
       .where("u.active", true)
       .select(
         "e.employee_id",
-        "e.user_id",
+        "u.id as user_id",
         "e.full_name",
         "e.email",
         "e.department",
@@ -771,7 +674,16 @@ exports.getAllEmployeesLeaveBalances = asyncHandler(async (req, res) => {
         "e.employment_status",
         "e.hire_date",
         "d.name as department_name",
-        "lb.*"
+        "lb.id as lb_id",
+        "lb.year as lb_year",
+        "lb.annual_leave",
+        "lb.sick_leave",
+        "lb.long_leave",
+        "lb.maternity_leave",
+        "lb.paternity_leave",
+        "lb.marriage_leave",
+        "lb.death_leave",
+        "lb.hajj_umrah_leave"
       )
 
     // Apply filters
@@ -785,13 +697,12 @@ exports.getAllEmployeesLeaveBalances = asyncHandler(async (req, res) => {
 
     const employees = await query.orderBy("e.full_name", "asc")
 
-    // For employees without leave balance, create them using the service
-    const results = []
-    for (const employee of employees) {
-      let leaveBalance = employee.id ? {
-        id: employee.id,
+    // Map the results directly without the problematic loop
+    const results = employees.map(employee => {
+      const leaveBalance = employee.lb_id ? {
+        id: employee.lb_id,
         user_id: employee.user_id,
-        year: employee.year,
+        year: employee.lb_year,
         annual_leave: employee.annual_leave,
         sick_leave: employee.sick_leave,
         long_leave: employee.long_leave,
@@ -800,21 +711,9 @@ exports.getAllEmployeesLeaveBalances = asyncHandler(async (req, res) => {
         marriage_leave: employee.marriage_leave,
         death_leave: employee.death_leave,
         hajj_umrah_leave: employee.hajj_umrah_leave
-      } : null
+      } : null;
 
-      if (!leaveBalance) {
-        try {
-          leaveBalance = await employeeLeaveBalanceService.getEmployeeLeaveBalance(
-            employee.user_id, 
-            targetYear
-          )
-        } catch (error) {
-          console.error(`Failed to get leave balance for employee ${employee.employee_id}:`, error)
-          continue
-        }
-      }
-
-      results.push({
+      return {
         employee: {
           id: employee.employee_id,
           user_id: employee.user_id,
@@ -827,8 +726,8 @@ exports.getAllEmployeesLeaveBalances = asyncHandler(async (req, res) => {
           hire_date: employee.hire_date
         },
         leave_balance: leaveBalance
-      })
-    }
+      };
+    });
 
     res.status(200).json({
       success: true,
@@ -946,5 +845,68 @@ exports.getLeaveBalanceStatistics = asyncHandler(async (req, res) => {
   } catch (error) {
     res.status(500)
     throw new Error(`Failed to get leave balance statistics: ${error.message}`)
+  }
+})
+
+/**
+ * @desc    Manually adjust an employee's leave balance for a specific leave type
+ * @route   POST /api/employees/:id/leave-balance/adjust
+ * @access  Private/Admin/HR
+ */
+exports.adjustLeaveBalance = asyncHandler(async (req, res) => {
+  // Only admin and HR can adjust leave balances
+  if (!req.hasAnyRole(["admin", "hr", "hr_manager"])) {
+    res.status(403)
+    throw new Error("Not authorized to adjust leave balances")
+  }
+
+  const { id } = req.params
+  const { leaveType, adjustmentType, amount, reason, year } = req.body
+
+  if (!leaveType || !adjustmentType || !amount || !reason) {
+    res.status(400)
+    throw new Error("Missing required fields: leaveType, adjustmentType, amount, reason")
+  }
+
+  if (typeof amount !== 'number' || amount <= 0) {
+    res.status(400)
+    throw new Error("Amount must be a positive number")
+  }
+
+  if (!['add', 'reduce'].includes(adjustmentType)) {
+    res.status(400)
+    throw new Error("Invalid adjustmentType. Must be 'add' or 'reduce'")
+  }
+
+  // Find employee
+  const employee = await db("employees")
+    .where("employee_id", id)
+    .orWhere("user_id", id)
+    .first()
+
+  if (!employee) {
+    res.status(404)
+    throw new Error("Employee not found")
+  }
+
+  try {
+    const updatedBalance = await employeeLeaveBalanceService.adjustLeaveBalance({
+      userId: employee.user_id,
+      leaveType,
+      adjustmentType,
+      amount,
+      reason,
+      actorId: req.user.id,
+      year: year ? parseInt(year) : null
+    })
+
+    res.status(200).json({
+      success: true,
+      message: "Leave balance adjusted successfully",
+      data: updatedBalance
+    })
+  } catch (error) {
+    res.status(500)
+    throw new Error(`Failed to adjust leave balance: ${error.message}`)
   }
 })

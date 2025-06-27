@@ -19,9 +19,9 @@ const assignDepartmentManager = async (userId, role, department) => {
       return false
     }
 
-    // Find the department by name
+    // Find the department by name, case-insensitively
     const departmentRecord = await db("departments")
-      .where({ name: department })
+      .whereRaw('LOWER(name) = ?', [department.toLowerCase()])
       .first()
 
     // If department doesn't exist, return false

@@ -48,7 +48,28 @@ const getUserById = asyncHandler(async (req, res) => {
       throw new Error("Forbidden: You do not have permission to view this user's data.")
   }
 
-  const user = await db("users").where({ id }).select("-password").first()
+  const user = await db("users")
+    .join("employees as e", "users.id", "e.employee_id")
+    .join("departments as d", "e.department", "d.id")
+    .select(
+      "users.id",
+      "users.name",
+      "users.email",
+      "users.role",
+      "users.active",
+      "e.gender",
+      "e.date_of_birth",
+      "e.marital_status",
+      "e.address",
+      "e.phone_number",
+      "e.place_of_birth",
+      "e.basic_salary",
+      "e.number_of_children",
+      "d.name as department_name"
+    )
+    .where("users.id", id)
+    .first()
+
   if (!user) {
     res.status(404)
     throw new Error("User not found")
@@ -167,11 +188,38 @@ const deleteUser = asyncHandler(async (req, res) => {
     throw new Error("You cannot delete your own account.")
   }
 
+  // Check if user exists and get their role
+  const user = await db("users").where({ id }).first()
+  if (!user) {
+    res.status(404)
+    throw new Error("User not found")
+  }
+
   await db.transaction(async trx => {
-      await trx('user_roles').where({ user_id: id }).del();
-      await trx('employees').where({ user_id: id }).del();
-      // etc for other related tables
-      await trx("users").where({ id }).del();
+    // 1. Remove user from being a department manager
+    await trx("departments").where({ manager_id: id }).update({ manager_id: null });
+
+    // 2. Delete user roles
+    await trx('user_roles').where({ user_id: id }).del();
+
+    // 3. Delete compensation records
+    await trx('compensation').where({ user_id: id }).del();
+
+    // 4. Delete payroll items
+    await trx('payroll_items').where({ user_id: id }).del();
+
+    // 5. Delete leave requests
+    await trx('leave_requests').where({ user_id: id }).del();
+
+    // 6. Update tasks where user is assigned
+    await trx('onboarding_tasks').where({ assigned_to: id }).update({ assigned_to: null });
+    await trx('offboarding_tasks').where({ assigned_to: id }).update({ assigned_to: null });
+
+    // 7. Delete or update employee record
+    await trx('employees').where({ user_id: id }).update({ user_id: null });
+
+    // 8. Finally delete the user
+    await trx("users").where({ id }).del();
   })
 
   clearCache(id);

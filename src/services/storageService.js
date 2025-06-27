@@ -1,99 +1,176 @@
-const fs = require("fs")
-const path = require("path")
-const { promisify } = require("util")
+const axios = require("axios");
+const path = require("path");
+const { v4: uuidv4 } = require("uuid");
 
-const mkdirAsync = promisify(fs.mkdir)
-const unlinkAsync = promisify(fs.unlink)
-
-const UPLOADS_DIR = path.join(__dirname, "../../uploads")
-
-class StorageService {
-  constructor() {
-    this.storageType = process.env.STORAGE_TYPE || "local"
-    if (this.storageType === "local" && !fs.existsSync(UPLOADS_DIR)) {
-      fs.mkdirSync(UPLOADS_DIR, { recursive: true })
-    }
-  }
-
-  /**
-   * Uploads a file to the configured storage provider.
-   * @param {object} file - The file object from multer.
-   * @param {string} directory - The subdirectory to upload to (e.g., 'documents', 'avatars').
-   * @returns {Promise<{file_key: string, file_location: string}>} - The key and location of the uploaded file.
-   */
-  async uploadFile(file, directory) {
-    return this.uploadToLocal(file, directory)
-  }
-
-  /**
-   * Uploads a file to the local filesystem.
-   * @param {object} file - The file object from multer.
-   * @param {string} directory - The subdirectory.
-   * @returns {Promise<{file_key: string, file_location: string}>}
-   */
-  async uploadToLocal(file, directory) {
-    const dirPath = path.join(UPLOADS_DIR, directory)
-    await mkdirAsync(dirPath, { recursive: true })
-
-    const fileExtension = path.extname(file.originalname)
-    const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}${fileExtension}`
-    const filePath = path.join(dirPath, fileName)
-
-    fs.writeFileSync(filePath, file.buffer)
-
-    const fileKey = path.join(directory, fileName)
-    return {
-      file_key: fileKey,
-      file_location: `/uploads/${fileKey.replace(/\\/g, "/")}`, // URL-friendly path
-    }
-  }
-
-  /**
-   * Deletes a file from the configured storage.
-   * @param {string} key - The key of the file to delete.
-   * @returns {Promise<void>}
-   */
-  async deleteFile(key) {
-    return this.deleteFromLocal(key)
-  }
-
-  /**
-   * Deletes a file from the local filesystem.
-   * @param {string} key - The key of the file to delete.
-   * @returns {Promise<void>}
-   */
-  async deleteFromLocal(key) {
-    try {
-      if (!key) {
-        console.warn("deleteFromLocal called with null or undefined key.");
-        return;
-      }
-      const filePath = path.join(UPLOADS_DIR, key)
-      if (fs.existsSync(filePath)) {
-        await unlinkAsync(filePath)
-        console.log(`Local file deleted: ${filePath}`)
-      } else {
-        console.warn(`Local file not found for deletion: ${filePath}`)
-      }
-    } catch (error) {
-      console.error(`Error deleting local file ${key}:`, error)
-      throw new Error("Could not delete file from local storage.")
-    }
-  }
-
-  /**
-   * Gets a temporary signed URL for a file.
-   * For local storage, this can just return the static path.
-   * @param {string} key - The key of the file.
-   * @param {number} expiresIn - The expiration time in seconds (ignored for local).
-   * @returns {Promise<string>} - The accessible URL for the file.
-   */
-  async getSignedUrl(key, expiresIn = 3600) {
-    // For local storage, we just return the direct path.
-    // In a real production scenario with protected static files, this would need a mechanism
-    // to serve the file only to authorized users, perhaps via a dedicated route.
-    return `/uploads/${key.replace(/\\/g, "/")}`
+// Validasi bahwa semua variabel lingkungan yang wajib telah diatur
+const requiredEnvVars = ['B2_APPLICATION_KEY_ID', 'B2_APPLICATION_KEY', 'B2_BUCKET_ID'];
+for (const varName of requiredEnvVars) {
+  if (!process.env[varName]) {
+    throw new Error(`FATAL: Variabel lingkungan untuk Backblaze B2 tidak ditemukan: ${varName}. Mohon periksa file .env Anda.`);
   }
 }
 
-module.exports = new StorageService()
+class StorageService {
+  constructor() {
+    this.authToken = null;
+    this.apiUrl = null;
+    this.downloadUrl = null;
+    this.bucketId = process.env.B2_BUCKET_ID;
+  }
+
+  async authorize() {
+    try {
+      const authString = Buffer.from(`${process.env.B2_APPLICATION_KEY_ID}:${process.env.B2_APPLICATION_KEY}`).toString('base64');
+      const response = await axios.get('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', {
+        headers: { 'Authorization': `Basic ${authString}` }
+      });
+
+      this.authToken = response.data.authorizationToken;
+      this.apiUrl = response.data.apiUrl;
+      this.downloadUrl = response.data.downloadUrl;
+      return true;
+    } catch (error) {
+      console.error('Error authorizing with B2:', error.message);
+      throw new Error(`Gagal mengotorisasi dengan B2: ${error.message}`);
+    }
+  }
+
+  async getUploadUrl() {
+    try {
+      if (!this.authToken || !this.apiUrl) {
+        await this.authorize();
+      }
+
+      const response = await axios.post(`${this.apiUrl}/b2api/v2/b2_get_upload_url`, 
+        { bucketId: this.bucketId },
+        { headers: { 'Authorization': this.authToken } }
+      );
+
+      return {
+        uploadUrl: response.data.uploadUrl,
+        uploadAuthToken: response.data.authorizationToken
+      };
+    } catch (error) {
+      console.error('Error getting upload URL:', error.message);
+      throw new Error(`Gagal mendapatkan URL upload: ${error.message}`);
+    }
+  }
+
+  async uploadFile(file, directory) {
+    try {
+      if (!file || !file.buffer) {
+        throw new Error('Objek file tidak valid. Buffer file dibutuhkan.');
+      }
+
+      // Membuat nama file yang unik dan aman
+      const fileExtension = path.extname(file.originalname).toLowerCase();
+      const sanitizedFilename = path.basename(file.originalname, fileExtension)
+        .replace(/[^a-zA-Z0-9-]/g, '')
+        .toLowerCase();
+      
+      const uniqueKey = `${directory}/${sanitizedFilename}-${uuidv4()}${fileExtension}`;
+
+      // Get upload URL and auth token
+      const { uploadUrl, uploadAuthToken } = await this.getUploadUrl();
+
+      // Calculate SHA1 hash of file content
+      const sha1 = require('crypto').createHash('sha1').update(file.buffer).digest('hex');
+
+      // Upload file to B2
+      const response = await axios.post(uploadUrl, file.buffer, {
+        headers: {
+          'Authorization': uploadAuthToken,
+          'X-Bz-File-Name': uniqueKey,
+          'Content-Type': file.mimetype,
+          'Content-Length': file.buffer.length,
+          'X-Bz-Content-Sha1': sha1,
+          'X-Bz-Info-Author': 'unknown'
+        }
+      });
+
+      console.log(`File berhasil diunggah ke ${response.data.fileName}`);
+      return response.data.fileName;
+
+    } catch (error) {
+      console.error('Error saat mengunggah file ke Backblaze B2:', error);
+      throw new Error(`Gagal mengunggah file: ${error.message}`);
+    }
+  }
+
+  async deleteFile(key) {
+    try {
+      if (!key) {
+        console.warn("Percobaan menghapus file dengan key null atau undefined.");
+        return;
+      }
+
+      if (!this.authToken || !this.apiUrl) {
+        await this.authorize();
+      }
+
+      // First, get the file ID
+      const response = await axios.post(`${this.apiUrl}/b2api/v2/b2_list_file_names`, 
+        {
+          bucketId: this.bucketId,
+          startFileName: key,
+          maxFileCount: 1
+        },
+        { headers: { 'Authorization': this.authToken } }
+      );
+
+      if (response.data.files.length === 0) {
+        throw new Error('File tidak ditemukan');
+      }
+
+      const fileId = response.data.files[0].fileId;
+
+      // Delete the file using the file ID
+      await axios.post(`${this.apiUrl}/b2api/v2/b2_delete_file_version`,
+        {
+          fileName: key,
+          fileId: fileId
+        },
+        { headers: { 'Authorization': this.authToken } }
+      );
+
+      console.log(`File berhasil dihapus: ${key}`);
+
+    } catch (error) {
+      console.error(`Error saat menghapus file ${key} dari Backblaze B2:`, error);
+      throw new Error(`Gagal menghapus file: ${error.message}`);
+    }
+  }
+
+  async getSignedUrl(key, expiresIn = 3600) {
+    try {
+      if (!key) {
+        throw new Error('Key file dibutuhkan untuk membuat signed URL.');
+      }
+
+      if (!this.authToken || !this.downloadUrl) {
+        await this.authorize();
+      }
+
+      // Get download authorization
+      const response = await axios.post(`${this.apiUrl}/b2api/v2/b2_get_download_authorization`,
+        {
+          bucketId: this.bucketId,
+          fileNamePrefix: key,
+          validDurationInSeconds: expiresIn
+        },
+        { headers: { 'Authorization': this.authToken } }
+      );
+
+      // Construct the download URL
+      const downloadUrl = `${this.downloadUrl}/file/${process.env.B2_BUCKET_NAME}/${key}?Authorization=${response.data.authorizationToken}`;
+      
+      return downloadUrl;
+
+    } catch (error) {
+      console.error(`Error saat membuat signed URL untuk ${key}:`, error);
+      throw new Error(`Gagal membuat URL unduhan: ${error.message}`);
+    }
+  }
+}
+
+module.exports = new StorageService();

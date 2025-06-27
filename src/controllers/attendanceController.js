@@ -556,8 +556,8 @@ exports.getDashboardStats = asyncHandler(async (req, res) => {
         const monthlyAttendance = await db("attendance")
           .whereBetween("timestamp", [startOfMonth, endOfToday])
           .where("type", "check-in")
-          .distinct("user_id")
-          .count("user_id as count")
+          .groupBy("user_id")
+          .count("* as count")
           .first()
         
         const attendanceCount = parseInt(monthlyAttendance.count) || 0
@@ -595,8 +595,8 @@ exports.getDashboardStats = asyncHandler(async (req, res) => {
         .where({ user_id: userId })
         .whereBetween("timestamp", [startOfMonth, endOfToday])
         .where("type", "check-in")
-        .distinct("user_id")
-        .count("user_id as count")
+        .groupBy("user_id")
+        .count("* as count")
         .first()
       
       const userAttendanceCount = parseInt(userMonthlyAttendance.count) || 0

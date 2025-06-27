@@ -90,6 +90,7 @@ app.use("/api/employees", require("../routes/employeeRoutes"))
 app.use("/api/announcements", require("../routes/announcementRoutes"))
 app.use("/api/roles", require("../routes/roleRoutes"))
 app.use("/api/permissions", require("../routes/permissionRoutes"))
+app.use("/api/master-data", require("../routes/masterDataRoutes"))
 
 app.get("/test", (_req, res) => {
   res.status(200).json({ status: "ok", message: "Test endpoint working" })

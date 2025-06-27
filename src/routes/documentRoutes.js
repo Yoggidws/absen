@@ -2,7 +2,6 @@ const express = require("express")
 const router = express.Router()
 const multer = require("multer")
 const path = require("path")
-const fs = require("fs") // Import the 'fs' module
 const { v4: uuidv4 } = require("uuid")
 const {
   uploadDocument,
@@ -14,26 +13,13 @@ const {
   getDocumentStats,
   getSignedUrlForDocument,
   getDocumentsForUser,
+  getMyDocuments,
 } = require("../controllers/documentController")
 const { enhancedProtect } = require("../middlewares/enhancedAuthMiddleware")
-const { rbac } = require("../middlewares/rbacMiddleware")
+const { rbac, clearAllPermissionCache } = require("../middlewares/rbacMiddleware")
 
 // Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, "../../uploads/documents")
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true })
-    }
-    cb(null, uploadDir)
-  },
-  filename: (req, file, cb) => {
-    // Generate unique filename
-    const uniqueFilename = `${uuidv4()}-${file.originalname}`
-    cb(null, uniqueFilename)
-  },
-})
+const storage = multer.memoryStorage()
 
 // File filter to restrict file types
 const fileFilter = (req, file, cb) => {
@@ -65,13 +51,19 @@ const upload = multer({
 // Protected routes
 router.post("/", enhancedProtect, rbac.can("upload:document:own"), upload.single("file"), uploadDocument)
 router.get("/", enhancedProtect, rbac.can("read:document:all"), getDocuments)
+router.get("/me", enhancedProtect, rbac.can("read:document:own"), getMyDocuments)
 router.get("/stats", enhancedProtect, rbac.can("read:document:all"), getDocumentStats)
+router.get("/user/:userId", enhancedProtect, rbac.can("read:document:all"), getDocumentsForUser)
 router.get("/:id", enhancedProtect, getDocumentById)
 router.get("/:id/download", enhancedProtect, downloadDocument)
 router.put("/:id", enhancedProtect, rbac.can("update:document:own"), updateDocument)
 router.delete("/:id", enhancedProtect, rbac.can("delete:document:own"), deleteDocument)
-router.get("/me", enhancedProtect, rbac.can("read:document:own"), getDocuments)
-router.get("/user/:userId", enhancedProtect, rbac.can("read:document:all"), getDocumentsForUser)
 router.get("/:id/signed-url", enhancedProtect, getSignedUrlForDocument)
+
+// Admin route to clear cache
+router.post("/clear-cache", enhancedProtect, rbac.can("manage:roles"), (req, res) => {
+    clearAllPermissionCache();
+    res.status(200).json({ success: true, message: "Permission cache cleared." });
+});
 
 module.exports = router

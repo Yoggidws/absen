@@ -115,6 +115,11 @@ exports.register = asyncHandler(async (req, res) => {
     // If the user has a department, update the employee's department_id
     if (department) {
       await updateEmployeeDepartmentId(userId, department)
+
+      // If user is a manager or admin, try to assign as department manager
+      if (userRole === 'manager' || userRole === 'admin') {
+        await assignDepartmentManager(userId, userRole, department)
+      }
     }
 
     const token = generateToken(user.id)

@@ -53,37 +53,7 @@ const getAllowedOrigins = () => {
 const allowedOrigins = getAllowedOrigins();
 
 const corsOptions = {
-  origin: (origin, callback) => {
-    console.log('CORS request from origin:', origin);
-    console.log('NODE_ENV:', process.env.NODE_ENV);
-    console.log('VERCEL:', process.env.VERCEL);
-    
-    const allowedOrigins = getAllowedOrigins();
-    console.log('Allowed origins:', allowedOrigins);
-    
-    // Allow requests with no origin (like mobile apps, curl requests, or same-origin)
-    if (!origin) {
-      console.log('No origin header, allowing request');
-      return callback(null, true);
-    }
-    
-    // Allow all origins in development or if VERCEL environment is detected and ALLOWED_ORIGINS is not properly set
-    if (process.env.NODE_ENV === 'development' || 
-        (process.env.VERCEL && (!process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS.includes('${')))) {
-      console.log('Development mode or Vercel env issue detected, allowing all origins');
-      return callback(null, true);
-    }
-    
-    // Check if origin is in allowed list or if we allow all origins
-    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-      console.log('Origin allowed:', origin);
-      callback(null, true);
-    } else {
-      console.log('Origin not allowed:', origin);
-      console.log('Available origins:', allowedOrigins);
-      callback(new Error(`CORS: Origin ${origin} not allowed`));
-    }
-  },
+  origin: true, // Allow all origins for now to fix the immediate issue
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
   allowedHeaders: [
@@ -109,6 +79,46 @@ app.use(cors(corsOptions));
 // Apply security middleware
 app.use(helmet()) // Add security headers
 app.use("/api", apiLimiter) // Apply rate limiting to API routes
+
+// Add explicit CORS headers middleware as a backup
+app.use((req, res, next) => {
+  const allowedOrigins = getAllowedOrigins();
+  const origin = req.headers.origin;
+  
+  console.log('Setting explicit CORS headers for request:', req.method, req.url);
+  console.log('Request origin:', origin);
+  console.log('Allowed origins:', allowedOrigins);
+  
+  // Always set CORS headers for Vercel environment or development
+  if (process.env.VERCEL || process.env.NODE_ENV === 'development' || 
+      !process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS.includes('${')) {
+    console.log('Setting permissive CORS headers');
+    res.header('Access-Control-Allow-Origin', origin || '*');
+  } else if (origin && allowedOrigins.includes(origin)) {
+    console.log('Setting CORS header for allowed origin:', origin);
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (allowedOrigins.includes('*')) {
+    console.log('Setting wildcard CORS header');
+    res.header('Access-Control-Allow-Origin', '*');
+  } else {
+    console.log('Setting fallback CORS headers');
+    res.header('Access-Control-Allow-Origin', 'https://hris-jet.vercel.app');
+  }
+  
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Request-Method, Access-Control-Request-Headers');
+  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    console.log('Handling OPTIONS preflight request');
+    res.status(200).end();
+    return;
+  }
+  
+  next();
+});
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason)
@@ -216,9 +226,33 @@ app.post("/reset-pool", async (_req, res) => {
 
 app.use(errorHandler)
 
-// The serverless handler no longer needs its own CORS logic.
-// The main `app.use(cors(corsOptions))` will handle it.
+// The serverless handler with improved CORS handling
 const handleServerless = (req, res) => {
+  console.log('Serverless handler called for:', req.method, req.url);
+  console.log('Request headers:', JSON.stringify(req.headers, null, 2));
+  
+  // Ensure CORS headers are set for serverless environment
+  const origin = req.headers.origin;
+  console.log('Serverless request origin:', origin);
+  
+  // Set CORS headers directly for Vercel
+  if (origin && (origin.includes('hris-jet.vercel.app') || origin.includes('absen-iota.vercel.app') || origin.includes('localhost'))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', 'https://hris-jet.vercel.app');
+  }
+  
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Access-Control-Request-Method, Access-Control-Request-Headers');
+  
+  // Handle preflight OPTIONS requests immediately
+  if (req.method === 'OPTIONS') {
+    console.log('Handling OPTIONS in serverless handler');
+    res.status(200).end();
+    return;
+  }
+  
   return app(req, res);
 };
 
